@@ -199,7 +199,7 @@ __naked void pass_pointer_to_helper_function(void)
 SEC("socket")
 __description("unpriv: indirectly pass pointer on stack to helper function")
 __success __failure_unpriv
-__msg_unpriv("invalid indirect read from stack R2 off -8+0 size 8")
+__msg_unpriv("invalid read from stack R2 off -8+0 size 8")
 __retval(0)
 __naked void on_stack_to_helper_function(void)
 {
@@ -619,7 +619,7 @@ __naked void pass_pointer_to_tail_call(void)
 
 SEC("socket")
 __description("unpriv: cmp map pointer with zero")
-__success __success_unpriv
+__success __failure_unpriv __msg_unpriv("R1 pointer comparison")
 __retval(0)
 __naked void cmp_map_pointer_with_zero(void)
 {

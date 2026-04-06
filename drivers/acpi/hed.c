@@ -57,7 +57,7 @@ static int acpi_hed_add(struct acpi_device *device)
 	hed_handle = device->handle;
 
 	err = acpi_dev_install_notify_handler(device, ACPI_DEVICE_NOTIFY,
-					      acpi_hed_notify);
+					      acpi_hed_notify, device);
 	if (err)
 		hed_handle = NULL;
 
@@ -80,12 +80,7 @@ static struct acpi_driver acpi_hed_driver = {
 		.remove = acpi_hed_remove,
 	},
 };
-
-static int __init acpi_hed_driver_init(void)
-{
-	return acpi_bus_register_driver(&acpi_hed_driver);
-}
-subsys_initcall(acpi_hed_driver_init);
+module_acpi_driver(acpi_hed_driver);
 
 MODULE_AUTHOR("Huang Ying");
 MODULE_DESCRIPTION("ACPI Hardware Error Device Driver");

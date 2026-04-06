@@ -7,7 +7,7 @@
 
 #include <linux/slab.h>
 #include <linux/etherdevice.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include "wme.h"
 #include "mesh.h"
 
@@ -151,7 +151,7 @@ static int mesh_path_sel_frame_tx(enum mpath_frame_type action, u8 flags,
 		break;
 	default:
 		kfree_skb(skb);
-		return -ENOTSUPP;
+		return -EOPNOTSUPP;
 	}
 	*pos++ = ie_len;
 	*pos++ = flags;
@@ -220,16 +220,18 @@ static void prepare_frame_for_deferred_tx(struct ieee80211_sub_if_data *sdata,
 /**
  * mesh_path_error_tx - Sends a PERR mesh management frame
  *
+ * @sdata: local mesh subif
  * @ttl: allowed remaining hops
  * @target: broken destination
  * @target_sn: SN of the broken destination
  * @target_rcode: reason code for this PERR
  * @ra: node this frame is addressed to
- * @sdata: local mesh subif
  *
  * Note: This function may be called with driver locks taken that the driver
  * also acquires in the TX path.  To avoid a deadlock we don't transmit the
  * frame directly but add it to the pending queue instead.
+ *
+ * Returns: 0 on success
  */
 int mesh_path_error_tx(struct ieee80211_sub_if_data *sdata,
 		       u8 ttl, const u8 *target, u32 target_sn,
@@ -365,12 +367,6 @@ u32 airtime_link_metric_get(struct ieee80211_local *local,
 	return (u32)result;
 }
 
-/* Check that the first metric is at least 10% better than the second one */
-static bool is_metric_better(u32 x, u32 y)
-{
-	return (x < y) && (x < (y - x / 10));
-}
-
 /**
  * hwmp_route_info_get - Update routing info to originator and transmitter
  *
@@ -462,8 +458,8 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 				    (mpath->sn == orig_sn &&
 				     (rcu_access_pointer(mpath->next_hop) !=
 						      sta ?
-					      !is_metric_better(new_metric, mpath->metric) :
-					      new_metric >= mpath->metric))) {
+					      mult_frac(new_metric, 10, 9) :
+					      new_metric) >= mpath->metric)) {
 					process = false;
 					fresh_info = false;
 				}
@@ -537,8 +533,8 @@ static u32 hwmp_route_info_get(struct ieee80211_sub_if_data *sdata,
 			if ((mpath->flags & MESH_PATH_FIXED) ||
 			    ((mpath->flags & MESH_PATH_ACTIVE) &&
 			     ((rcu_access_pointer(mpath->next_hop) != sta ?
-				      !is_metric_better(last_hop_metric, mpath->metric) :
-				       last_hop_metric > mpath->metric))))
+				       mult_frac(last_hop_metric, 10, 9) :
+				       last_hop_metric) > mpath->metric)))
 				fresh_info = false;
 		} else {
 			mpath = mesh_path_add(sdata, ta);
@@ -634,7 +630,7 @@ static void hwmp_preq_frame_process(struct ieee80211_sub_if_data *sdata,
 				mesh_path_add_gate(mpath);
 		}
 		rcu_read_unlock();
-	} else if (ifmsh->mshcfg.dot11MeshForwarding) {
+	} else {
 		rcu_read_lock();
 		mpath = mesh_path_lookup(sdata, target_addr);
 		if (mpath) {
@@ -652,8 +648,6 @@ static void hwmp_preq_frame_process(struct ieee80211_sub_if_data *sdata,
 			}
 		}
 		rcu_read_unlock();
-	} else {
-		forward = false;
 	}
 
 	if (reply) {
@@ -671,7 +665,7 @@ static void hwmp_preq_frame_process(struct ieee80211_sub_if_data *sdata,
 		}
 	}
 
-	if (forward) {
+	if (forward && ifmsh->mshcfg.dot11MeshForwarding) {
 		u32 preq_id;
 		u8 hopcount;
 
@@ -1143,8 +1137,8 @@ enddiscovery:
 /**
  * mesh_nexthop_resolve - lookup next hop; conditionally start path discovery
  *
- * @skb: 802.11 frame to be sent
  * @sdata: network subif the frame will be sent through
+ * @skb: 802.11 frame to be sent
  *
  * Lookup next hop for given skb and start path discovery if no
  * forwarding information is found.
@@ -1251,8 +1245,8 @@ void mesh_path_refresh(struct ieee80211_sub_if_data *sdata,
  * this function is considered "using" the associated mpath, so preempt a path
  * refresh if this mpath expires soon.
  *
- * @skb: 802.11 frame to be sent
  * @sdata: network subif the frame will be sent through
+ * @skb: 802.11 frame to be sent
  *
  * Returns: 0 if the next hop was found. Nonzero otherwise.
  */

@@ -10,7 +10,6 @@
 #include <linux/mfd/core.h>
 #include <linux/module.h>
 #include <linux/of_platform.h>
-#include <linux/platform_data/syscon.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/stat.h>
@@ -90,7 +89,6 @@ static int vexpress_sysreg_probe(struct platform_device *pdev)
 	struct resource *mem;
 	void __iomem *base;
 	struct gpio_chip *mmc_gpio_chip;
-	int ret;
 
 	mem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!mem)
@@ -111,10 +109,7 @@ static int vexpress_sysreg_probe(struct platform_device *pdev)
 	bgpio_init(mmc_gpio_chip, &pdev->dev, 0x4, base + SYS_MCI,
 			NULL, NULL, NULL, NULL, 0);
 	mmc_gpio_chip->ngpio = 2;
-
-	ret = devm_gpiochip_add_data(&pdev->dev, mmc_gpio_chip, NULL);
-	if (ret)
-		return ret;
+	devm_gpiochip_add_data(&pdev->dev, mmc_gpio_chip, NULL);
 
 	return devm_mfd_add_devices(&pdev->dev, PLATFORM_DEVID_AUTO,
 			vexpress_sysreg_cells,
@@ -136,4 +131,5 @@ static struct platform_driver vexpress_sysreg_driver = {
 };
 
 module_platform_driver(vexpress_sysreg_driver);
+MODULE_DESCRIPTION("Versatile Express system registers driver");
 MODULE_LICENSE("GPL v2");

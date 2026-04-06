@@ -15,7 +15,6 @@
 #define MWAIT_HINT2SUBSTATE(hint)	((hint) & MWAIT_CSTATE_MASK)
 #define MWAIT_C1_SUBSTATE_MASK  0xf0
 
-#define CPUID_MWAIT_LEAF		5
 #define CPUID5_ECX_EXTENSIONS_SUPPORTED 0x1
 #define CPUID5_ECX_INTERRUPT_BREAK	0x2
 
@@ -44,6 +43,8 @@ static __always_inline void __monitorx(const void *eax, unsigned long ecx,
 
 static __always_inline void __mwait(unsigned long eax, unsigned long ecx)
 {
+	mds_idle_clear_cpu_buffers();
+
 	/* "mwait %eax, %ecx;" */
 	asm volatile(".byte 0x0f, 0x01, 0xc9;"
 		     :: "a" (eax), "c" (ecx));
@@ -78,16 +79,25 @@ static __always_inline void __mwait(unsigned long eax, unsigned long ecx)
 static __always_inline void __mwaitx(unsigned long eax, unsigned long ebx,
 				     unsigned long ecx)
 {
-	/* No need for TSA buffer clearing on AMD */
+	/* No MDS buffer clear as this is AMD/HYGON only */
 
 	/* "mwaitx %eax, %ebx, %ecx;" */
 	asm volatile(".byte 0x0f, 0x01, 0xfb;"
 		     :: "a" (eax), "b" (ebx), "c" (ecx));
 }
 
+/*
+ * Re-enable interrupts right upon calling mwait in such a way that
+ * no interrupt can fire _before_ the execution of mwait, ie: no
+ * instruction must be placed between "sti" and "mwait".
+ *
+ * This is necessary because if an interrupt queues a timer before
+ * executing mwait, it would otherwise go unnoticed and the next tick
+ * would not be reprogrammed accordingly before mwait ever wakes up.
+ */
 static __always_inline void __sti_mwait(unsigned long eax, unsigned long ecx)
 {
-
+	mds_idle_clear_cpu_buffers();
 	/* "mwait %eax, %ecx;" */
 	asm volatile("sti; .byte 0x0f, 0x01, 0xc9;"
 		     :: "a" (eax), "c" (ecx));
@@ -105,29 +115,24 @@ static __always_inline void __sti_mwait(unsigned long eax, unsigned long ecx)
  */
 static __always_inline void mwait_idle_with_hints(unsigned long eax, unsigned long ecx)
 {
-	if (need_resched())
-		return;
-
-	x86_idle_clear_cpu_buffers();
-
 	if (static_cpu_has_bug(X86_BUG_MONITOR) || !current_set_polling_and_test()) {
-		const void *addr = &current_thread_info()->flags;
+		if (static_cpu_has_bug(X86_BUG_CLFLUSH_MONITOR)) {
+			mb();
+			clflush((void *)&current_thread_info()->flags);
+			mb();
+		}
 
-		alternative_input("", "clflush (%[addr])", X86_BUG_CLFLUSH_MONITOR, [addr] "a" (addr));
-		__monitor(addr, 0, 0);
+		__monitor((void *)&current_thread_info()->flags, 0, 0);
 
-		if (need_resched())
-			goto out;
-
-		if (ecx & 1) {
-			__mwait(eax, ecx);
-		} else {
-			__sti_mwait(eax, ecx);
-			raw_local_irq_disable();
+		if (!need_resched()) {
+			if (ecx & 1) {
+				__mwait(eax, ecx);
+			} else {
+				__sti_mwait(eax, ecx);
+				raw_local_irq_disable();
+			}
 		}
 	}
-
-out:
 	current_clr_polling();
 }
 

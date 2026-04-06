@@ -711,9 +711,6 @@ static int nbpf_desc_page_alloc(struct nbpf_channel *chan)
 		list_add_tail(&ldesc->node, &lhead);
 		ldesc->hwdesc_dma_addr = dma_map_single(dchan->device->dev,
 					hwdesc, sizeof(*hwdesc), DMA_TO_DEVICE);
-		if (dma_mapping_error(dchan->device->dev,
-				      ldesc->hwdesc_dma_addr))
-			goto unmap_error;
 
 		dev_dbg(dev, "%s(): mapped 0x%p to %pad\n", __func__,
 			hwdesc, &ldesc->hwdesc_dma_addr);
@@ -740,16 +737,6 @@ static int nbpf_desc_page_alloc(struct nbpf_channel *chan)
 	spin_unlock_irq(&chan->lock);
 
 	return ARRAY_SIZE(dpage->desc);
-
-unmap_error:
-	while (i--) {
-		ldesc--; hwdesc--;
-
-		dma_unmap_single(dchan->device->dev, ldesc->hwdesc_dma_addr,
-				 sizeof(hwdesc), DMA_TO_DEVICE);
-	}
-
-	return -ENOMEM;
 }
 
 static void nbpf_desc_put(struct nbpf_desc *desc)
@@ -910,7 +897,7 @@ static int nbpf_config(struct dma_chan *dchan,
 	/*
 	 * We could check config->slave_id to match chan->terminal here,
 	 * but with DT they would be coming from the same source, so
-	 * such a check would be superflous
+	 * such a check would be superfluous
 	 */
 
 	chan->slave_dst_addr = config->dst_addr;
@@ -1364,7 +1351,7 @@ static int nbpf_probe(struct platform_device *pdev)
 	if (irqs == 1) {
 		eirq = irqbuf[0];
 
-		for (i = 0; i < num_channels; i++)
+		for (i = 0; i <= num_channels; i++)
 			nbpf->chan[i].irq = irqbuf[0];
 	} else {
 		eirq = platform_get_irq_byname(pdev, "error");
@@ -1374,15 +1361,16 @@ static int nbpf_probe(struct platform_device *pdev)
 		if (irqs == num_channels + 1) {
 			struct nbpf_channel *chan;
 
-			for (i = 0, chan = nbpf->chan; i < num_channels;
+			for (i = 0, chan = nbpf->chan; i <= num_channels;
 			     i++, chan++) {
 				/* Skip the error IRQ */
 				if (irqbuf[i] == eirq)
 					i++;
-				if (i >= ARRAY_SIZE(irqbuf))
-					return -EINVAL;
 				chan->irq = irqbuf[i];
 			}
+
+			if (chan != nbpf->chan + num_channels)
+				return -EINVAL;
 		} else {
 			/* 2 IRQs and more than one channel */
 			if (irqbuf[0] == eirq)
@@ -1390,7 +1378,7 @@ static int nbpf_probe(struct platform_device *pdev)
 			else
 				irq = irqbuf[0];
 
-			for (i = 0; i < num_channels; i++)
+			for (i = 0; i <= num_channels; i++)
 				nbpf->chan[i].irq = irq;
 		}
 	}
@@ -1466,7 +1454,7 @@ e_clk_off:
 	return ret;
 }
 
-static int nbpf_remove(struct platform_device *pdev)
+static void nbpf_remove(struct platform_device *pdev)
 {
 	struct nbpf_device *nbpf = platform_get_drvdata(pdev);
 	int i;
@@ -1484,8 +1472,6 @@ static int nbpf_remove(struct platform_device *pdev)
 	of_dma_controller_free(pdev->dev.of_node);
 	dma_async_device_unregister(&nbpf->dma_dev);
 	clk_disable_unprepare(nbpf->clk);
-
-	return 0;
 }
 
 static const struct platform_device_id nbpf_ids[] = {

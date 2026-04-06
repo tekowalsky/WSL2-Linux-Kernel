@@ -149,7 +149,6 @@ static int rxrpc_service_prealloc_one(struct rxrpc_sock *rx,
 
 id_in_use:
 	write_unlock(&rx->call_lock);
-	rxrpc_prefail_call(call, RXRPC_CALL_LOCAL_ERROR, -EBADSLT);
 	rxrpc_cleanup_call(call);
 	_leave(" = -EBADSLT");
 	return -EBADSLT;
@@ -189,8 +188,8 @@ void rxrpc_discard_prealloc(struct rxrpc_sock *rx)
 	/* Make sure that there aren't any incoming calls in progress before we
 	 * clear the preallocation buffers.
 	 */
-	spin_lock(&rx->incoming_lock);
-	spin_unlock(&rx->incoming_lock);
+	spin_lock_irq(&rx->incoming_lock);
+	spin_unlock_irq(&rx->incoming_lock);
 
 	head = b->peer_backlog_head;
 	tail = b->peer_backlog_tail;
@@ -219,7 +218,6 @@ void rxrpc_discard_prealloc(struct rxrpc_sock *rx)
 	tail = b->call_backlog_tail;
 	while (CIRC_CNT(head, tail, size) > 0) {
 		struct rxrpc_call *call = b->call_backlog[tail];
-		rxrpc_see_call(call, rxrpc_call_see_discard);
 		rcu_assign_pointer(call->socket, rx);
 		if (rx->discard_new_call) {
 			_debug("discard %lx", call->user_call_ID);
@@ -254,9 +252,6 @@ static struct rxrpc_call *rxrpc_alloc_incoming_call(struct rxrpc_sock *rx,
 	unsigned short call_head, conn_head, peer_head;
 	unsigned short call_tail, conn_tail, peer_tail;
 	unsigned short call_count, conn_count;
-
-	if (!b)
-		return NULL;
 
 	/* #calls >= #conns >= #peers must hold true. */
 	call_head = smp_load_acquire(&b->call_backlog_head);
@@ -348,7 +343,7 @@ bool rxrpc_new_incoming_call(struct rxrpc_local *local,
 	if (sp->hdr.type != RXRPC_PACKET_TYPE_DATA)
 		return rxrpc_protocol_error(skb, rxrpc_eproto_no_service_call);
 
-	read_lock(&local->services_lock);
+	read_lock_irq(&local->services_lock);
 
 	/* Weed out packets to services we're not offering.  Packets that would
 	 * begin a call are explicitly rejected and the rest are just
@@ -404,34 +399,34 @@ bool rxrpc_new_incoming_call(struct rxrpc_local *local,
 	spin_unlock(&conn->state_lock);
 
 	spin_unlock(&rx->incoming_lock);
-	read_unlock(&local->services_lock);
+	read_unlock_irq(&local->services_lock);
 
 	if (hlist_unhashed(&call->error_link)) {
-		spin_lock(&call->peer->lock);
+		spin_lock_irq(&call->peer->lock);
 		hlist_add_head(&call->error_link, &call->peer->error_targets);
-		spin_unlock(&call->peer->lock);
+		spin_unlock_irq(&call->peer->lock);
 	}
 
 	_leave(" = %p{%d}", call, call->debug_id);
-	rxrpc_input_call_event(call, skb);
+	rxrpc_queue_rx_call_packet(call, skb);
 	rxrpc_put_call(call, rxrpc_call_put_input);
 	return true;
 
 unsupported_service:
-	read_unlock(&local->services_lock);
+	read_unlock_irq(&local->services_lock);
 	return rxrpc_direct_abort(skb, rxrpc_abort_service_not_offered,
 				  RX_INVALID_OPERATION, -EOPNOTSUPP);
 unsupported_security:
-	read_unlock(&local->services_lock);
+	read_unlock_irq(&local->services_lock);
 	return rxrpc_direct_abort(skb, rxrpc_abort_service_not_offered,
 				  RX_INVALID_OPERATION, -EKEYREJECTED);
 no_call:
 	spin_unlock(&rx->incoming_lock);
-	read_unlock(&local->services_lock);
+	read_unlock_irq(&local->services_lock);
 	_leave(" = f [%u]", skb->mark);
 	return false;
 discard:
-	read_unlock(&local->services_lock);
+	read_unlock_irq(&local->services_lock);
 	return true;
 }
 

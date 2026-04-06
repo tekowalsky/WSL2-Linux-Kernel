@@ -396,7 +396,7 @@ out_free_devlink:
 	return err;
 }
 
-static int mscc_ocelot_remove(struct platform_device *pdev)
+static void mscc_ocelot_remove(struct platform_device *pdev)
 {
 	struct ocelot *ocelot = platform_get_drvdata(pdev);
 
@@ -412,8 +412,6 @@ static int mscc_ocelot_remove(struct platform_device *pdev)
 	unregister_switchdev_notifier(&ocelot_switchdev_nb);
 	unregister_netdevice_notifier(&ocelot_netdevice_nb);
 	devlink_free(ocelot->devlink);
-
-	return 0;
 }
 
 static struct platform_driver mscc_ocelot_driver = {

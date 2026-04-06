@@ -574,7 +574,7 @@ static int sa_format_cmdl_gen(struct sa_cmdl_cfg *cfg, u8 *cmdl,
 	/* Clear the command label */
 	memzero_explicit(cmdl, (SA_MAX_CMDL_WORDS * sizeof(u32)));
 
-	/* Iniialize the command update structure */
+	/* Initialize the command update structure */
 	memzero_explicit(upd_info, sizeof(*upd_info));
 
 	if (cfg->enc_eng_id && cfg->auth_eng_id) {
@@ -2467,7 +2467,7 @@ destroy_dma_pool:
 	return ret;
 }
 
-static int sa_ul_remove(struct platform_device *pdev)
+static void sa_ul_remove(struct platform_device *pdev)
 {
 	struct sa_crypto_data *dev_data = platform_get_drvdata(pdev);
 
@@ -2485,8 +2485,6 @@ static int sa_ul_remove(struct platform_device *pdev)
 
 	pm_runtime_put_sync(&pdev->dev);
 	pm_runtime_disable(&pdev->dev);
-
-	return 0;
 }
 
 static struct platform_driver sa_ul_driver = {
@@ -2498,4 +2496,5 @@ static struct platform_driver sa_ul_driver = {
 		   },
 };
 module_platform_driver(sa_ul_driver);
+MODULE_DESCRIPTION("K3 SA2UL crypto accelerator driver");
 MODULE_LICENSE("GPL v2");

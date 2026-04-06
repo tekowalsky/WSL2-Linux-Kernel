@@ -611,7 +611,7 @@ static int hns_mdio_probe(struct platform_device *pdev)
  *
  * Return 0 on success, negative on failure
  */
-static int hns_mdio_remove(struct platform_device *pdev)
+static void hns_mdio_remove(struct platform_device *pdev)
 {
 	struct mii_bus *bus;
 
@@ -619,7 +619,6 @@ static int hns_mdio_remove(struct platform_device *pdev)
 
 	mdiobus_unregister(bus);
 	platform_set_drvdata(pdev, NULL);
-	return 0;
 }
 
 static const struct of_device_id hns_mdio_match[] = {

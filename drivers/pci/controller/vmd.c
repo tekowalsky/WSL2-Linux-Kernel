@@ -17,8 +17,6 @@
 #include <linux/rculist.h>
 #include <linux/rcupdate.h>
 
-#include <xen/xen.h>
-
 #include <asm/irqdomain.h>
 
 #define VMD_CFGBAR	0
@@ -127,7 +125,7 @@ struct vmd_irq_list {
 struct vmd_dev {
 	struct pci_dev		*dev;
 
-	raw_spinlock_t		cfg_lock;
+	spinlock_t		cfg_lock;
 	void __iomem		*cfgbar;
 
 	int msix_count;
@@ -206,22 +204,11 @@ static void vmd_irq_disable(struct irq_data *data)
 	raw_spin_unlock_irqrestore(&list_lock, flags);
 }
 
-/*
- * XXX: Stubbed until we develop acceptable way to not create conflicts with
- * other devices sharing the same vector.
- */
-static int vmd_irq_set_affinity(struct irq_data *data,
-				const struct cpumask *dest, bool force)
-{
-	return -EINVAL;
-}
-
 static struct irq_chip vmd_msi_controller = {
 	.name			= "VMD-MSI",
 	.irq_enable		= vmd_irq_enable,
 	.irq_disable		= vmd_irq_disable,
 	.irq_compose_msi_msg	= vmd_compose_msi_msg,
-	.irq_set_affinity	= vmd_irq_set_affinity,
 };
 
 static irq_hw_number_t vmd_get_hwirq(struct msi_domain_info *info,
@@ -328,7 +315,7 @@ static struct msi_domain_ops vmd_msi_domain_ops = {
 
 static struct msi_domain_info vmd_msi_domain_info = {
 	.flags		= MSI_FLAG_USE_DEF_DOM_OPS | MSI_FLAG_USE_DEF_CHIP_OPS |
-			  MSI_FLAG_PCI_MSIX,
+			  MSI_FLAG_NO_AFFINITY | MSI_FLAG_PCI_MSIX,
 	.ops		= &vmd_msi_domain_ops,
 	.chip		= &vmd_msi_controller,
 };
@@ -404,7 +391,7 @@ static int vmd_pci_read(struct pci_bus *bus, unsigned int devfn, int reg,
 	if (!addr)
 		return -EFAULT;
 
-	raw_spin_lock_irqsave(&vmd->cfg_lock, flags);
+	spin_lock_irqsave(&vmd->cfg_lock, flags);
 	switch (len) {
 	case 1:
 		*value = readb(addr);
@@ -419,7 +406,7 @@ static int vmd_pci_read(struct pci_bus *bus, unsigned int devfn, int reg,
 		ret = -EINVAL;
 		break;
 	}
-	raw_spin_unlock_irqrestore(&vmd->cfg_lock, flags);
+	spin_unlock_irqrestore(&vmd->cfg_lock, flags);
 	return ret;
 }
 
@@ -439,7 +426,7 @@ static int vmd_pci_write(struct pci_bus *bus, unsigned int devfn, int reg,
 	if (!addr)
 		return -EFAULT;
 
-	raw_spin_lock_irqsave(&vmd->cfg_lock, flags);
+	spin_lock_irqsave(&vmd->cfg_lock, flags);
 	switch (len) {
 	case 1:
 		writeb(value, addr);
@@ -457,7 +444,7 @@ static int vmd_pci_write(struct pci_bus *bus, unsigned int devfn, int reg,
 		ret = -EINVAL;
 		break;
 	}
-	raw_spin_unlock_irqrestore(&vmd->cfg_lock, flags);
+	spin_unlock_irqrestore(&vmd->cfg_lock, flags);
 	return ret;
 }
 
@@ -529,7 +516,7 @@ static void vmd_domain_reset(struct vmd_dev *vmd)
 
 			hdr_type = readb(base + PCI_HEADER_TYPE);
 
-			functions = (hdr_type & 0x80) ? 8 : 1;
+			functions = (hdr_type & PCI_HEADER_TYPE_MFD) ? 8 : 1;
 			for (fn = 0; fn < functions; fn++) {
 				base = vmd->cfgbar + PCIE_ECAM_OFFSET(bus,
 						PCI_DEVFN(dev, fn), 0);
@@ -983,24 +970,6 @@ static int vmd_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	struct vmd_dev *vmd;
 	int err;
 
-	if (xen_domain()) {
-		/*
-		 * Xen doesn't have knowledge about devices in the VMD bus
-		 * because the config space of devices behind the VMD bridge is
-		 * not known to Xen, and hence Xen cannot discover or configure
-		 * them in any way.
-		 *
-		 * Bypass of MSI remapping won't work in that case as direct
-		 * write by Linux to the MSI entries won't result in functional
-		 * interrupts, as Xen is the entity that manages the host
-		 * interrupt controller and must configure interrupts.  However
-		 * multiplexing of interrupts by the VMD bridge will work under
-		 * Xen, so force the usage of that mode which must always be
-		 * supported by VMD bridges.
-		 */
-		features &= ~VMD_FEAT_CAN_BYPASS_MSI_REMAP;
-	}
-
 	if (resource_size(&dev->resource[VMD_CFGBAR]) < (1 << 20))
 		return -ENOMEM;
 
@@ -1009,7 +978,7 @@ static int vmd_probe(struct pci_dev *dev, const struct pci_device_id *id)
 		return -ENOMEM;
 
 	vmd->dev = dev;
-	vmd->instance = ida_simple_get(&vmd_instance_ida, 0, 0, GFP_KERNEL);
+	vmd->instance = ida_alloc(&vmd_instance_ida, GFP_KERNEL);
 	if (vmd->instance < 0)
 		return vmd->instance;
 
@@ -1040,7 +1009,7 @@ static int vmd_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	if (features & VMD_FEAT_OFFSET_FIRST_VECTOR)
 		vmd->first_vec = 1;
 
-	raw_spin_lock_init(&vmd->cfg_lock);
+	spin_lock_init(&vmd->cfg_lock);
 	pci_set_drvdata(dev, vmd);
 	err = vmd_enable_domain(vmd, features);
 	if (err)
@@ -1051,7 +1020,7 @@ static int vmd_probe(struct pci_dev *dev, const struct pci_device_id *id)
 	return 0;
 
  out_release_instance:
-	ida_simple_remove(&vmd_instance_ida, vmd->instance);
+	ida_free(&vmd_instance_ida, vmd->instance);
 	return err;
 }
 
@@ -1073,14 +1042,14 @@ static void vmd_remove(struct pci_dev *dev)
 	vmd_cleanup_srcu(vmd);
 	vmd_detach_resources(vmd);
 	vmd_remove_irq_domain(vmd);
-	ida_simple_remove(&vmd_instance_ida, vmd->instance);
+	ida_free(&vmd_instance_ida, vmd->instance);
 }
 
 static void vmd_shutdown(struct pci_dev *dev)
 {
-        struct vmd_dev *vmd = pci_get_drvdata(dev);
+	struct vmd_dev *vmd = pci_get_drvdata(dev);
 
-        vmd_remove_irq_domain(vmd);
+	vmd_remove_irq_domain(vmd);
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -1102,10 +1071,7 @@ static int vmd_resume(struct device *dev)
 	struct vmd_dev *vmd = pci_get_drvdata(pdev);
 	int err, i;
 
-       if (vmd->irq_domain)
-               vmd_set_msi_remapping(vmd, true);
-       else
-               vmd_set_msi_remapping(vmd, false);
+	vmd_set_msi_remapping(vmd, !!vmd->irq_domain);
 
 	for (i = 0; i < vmd->msix_count; i++) {
 		err = devm_request_irq(dev, vmd->irqs[i].virq,
@@ -1160,5 +1126,6 @@ static struct pci_driver vmd_drv = {
 module_pci_driver(vmd_drv);
 
 MODULE_AUTHOR("Intel Corporation");
+MODULE_DESCRIPTION("Volume Management Device driver");
 MODULE_LICENSE("GPL v2");
 MODULE_VERSION("0.6");

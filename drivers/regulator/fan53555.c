@@ -46,7 +46,7 @@
 /* VSEL bit definitions */
 #define VSEL_BUCK_EN		BIT(7)
 #define VSEL_MODE		BIT(6)
-/* Chip ID and Verison */
+/* Chip ID and Version */
 #define DIE_ID			0x0F	/* ID1 */
 #define DIE_REV			0x0F	/* ID2 */
 /* Control bit definitions */
@@ -147,7 +147,6 @@ struct fan53555_device_info {
 	unsigned int slew_mask;
 	const unsigned int *ramp_delay_table;
 	unsigned int n_ramp_values;
-	unsigned int enable_time;
 	unsigned int slew_rate;
 };
 
@@ -283,7 +282,6 @@ static int fan53526_voltages_setup_fairchild(struct fan53555_device_info *di)
 	di->slew_mask = CTL_SLEW_MASK;
 	di->ramp_delay_table = slew_rates;
 	di->n_ramp_values = ARRAY_SIZE(slew_rates);
-	di->enable_time = 250;
 	di->vsel_count = FAN53526_NVOLTAGES;
 
 	return 0;
@@ -298,12 +296,10 @@ static int fan53555_voltages_setup_fairchild(struct fan53555_device_info *di)
 		case FAN53555_CHIP_REV_00:
 			di->vsel_min = 600000;
 			di->vsel_step = 10000;
-			di->enable_time = 400;
 			break;
 		case FAN53555_CHIP_REV_13:
 			di->vsel_min = 800000;
 			di->vsel_step = 10000;
-			di->enable_time = 400;
 			break;
 		default:
 			dev_err(di->dev,
@@ -315,19 +311,13 @@ static int fan53555_voltages_setup_fairchild(struct fan53555_device_info *di)
 	case FAN53555_CHIP_ID_01:
 	case FAN53555_CHIP_ID_03:
 	case FAN53555_CHIP_ID_05:
-		di->vsel_min = 600000;
-		di->vsel_step = 10000;
-		di->enable_time = 400;
-		break;
 	case FAN53555_CHIP_ID_08:
 		di->vsel_min = 600000;
 		di->vsel_step = 10000;
-		di->enable_time = 175;
 		break;
 	case FAN53555_CHIP_ID_04:
 		di->vsel_min = 603000;
 		di->vsel_step = 12826;
-		di->enable_time = 400;
 		break;
 	default:
 		dev_err(di->dev,
@@ -360,7 +350,6 @@ static int fan53555_voltages_setup_rockchip(struct fan53555_device_info *di)
 	di->slew_mask = CTL_SLEW_MASK;
 	di->ramp_delay_table = slew_rates;
 	di->n_ramp_values = ARRAY_SIZE(slew_rates);
-	di->enable_time = 360;
 	di->vsel_count = FAN53555_NVOLTAGES;
 
 	return 0;
@@ -383,7 +372,6 @@ static int rk8602_voltages_setup_rockchip(struct fan53555_device_info *di)
 	di->slew_mask = CTL_SLEW_MASK;
 	di->ramp_delay_table = slew_rates;
 	di->n_ramp_values = ARRAY_SIZE(slew_rates);
-	di->enable_time = 360;
 	di->vsel_count = RK8602_NVOLTAGES;
 
 	return 0;
@@ -407,7 +395,6 @@ static int fan53555_voltages_setup_silergy(struct fan53555_device_info *di)
 	di->slew_mask = CTL_SLEW_MASK;
 	di->ramp_delay_table = slew_rates;
 	di->n_ramp_values = ARRAY_SIZE(slew_rates);
-	di->enable_time = 400;
 	di->vsel_count = FAN53555_NVOLTAGES;
 
 	return 0;
@@ -607,7 +594,6 @@ static int fan53555_regulator_register(struct fan53555_device_info *di,
 	rdesc->ramp_mask = di->slew_mask;
 	rdesc->ramp_delay_table = di->ramp_delay_table;
 	rdesc->n_ramp_values = di->n_ramp_values;
-	rdesc->enable_time = di->enable_time;
 	rdesc->owner = THIS_MODULE;
 
 	rdev = devm_regulator_register(di->dev, &di->desc, config);
@@ -673,7 +659,6 @@ MODULE_DEVICE_TABLE(of, fan53555_dt_ids);
 
 static int fan53555_regulator_probe(struct i2c_client *client)
 {
-	const struct i2c_device_id *id = i2c_client_get_device_id(client);
 	struct device_node *np = client->dev.of_node;
 	struct fan53555_device_info *di;
 	struct fan53555_platform_data *pdata;
@@ -696,10 +681,8 @@ static int fan53555_regulator_probe(struct i2c_client *client)
 				     "Platform data not found!\n");
 
 	di->regulator = pdata->regulator;
-	if (client->dev.of_node) {
-		di->vendor =
-			(unsigned long)of_device_get_match_data(&client->dev);
-	} else {
+	di->vendor = (uintptr_t)i2c_get_match_data(client);
+	if (!dev_fwnode(&client->dev)) {
 		/* if no ramp constraint set, get the pdata ramp_delay */
 		if (!di->regulator->constraints.ramp_delay) {
 			if (pdata->slew_rate >= ARRAY_SIZE(slew_rates))
@@ -709,8 +692,6 @@ static int fan53555_regulator_probe(struct i2c_client *client)
 			di->regulator->constraints.ramp_delay
 					= slew_rates[pdata->slew_rate];
 		}
-
-		di->vendor = id->driver_data;
 	}
 
 	regmap = devm_regmap_init_i2c(client, &fan53555_regmap_config);

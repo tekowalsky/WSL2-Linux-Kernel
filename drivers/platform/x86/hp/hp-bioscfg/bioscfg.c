@@ -10,8 +10,6 @@
 #include <linux/fs.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/printk.h>
-#include <linux/string.h>
 #include <linux/wmi.h>
 #include "bioscfg.h"
 #include "../../firmware_attributes_class.h"
@@ -588,7 +586,6 @@ static void release_attributes_data(void)
 static int hp_add_other_attributes(int attr_type)
 {
 	struct kobject *attr_name_kobj;
-	union acpi_object *obj = NULL;
 	int ret;
 	char *attr_name;
 
@@ -648,7 +645,6 @@ err_other_attr_init:
 	kobject_put(attr_name_kobj);
 unlock_drv_mutex:
 	mutex_unlock(&bioscfg_drv.mutex);
-	kfree(obj);
 	return ret;
 }
 
@@ -787,12 +783,6 @@ static int hp_init_bios_buffer_attribute(enum hp_wmi_data_type attr_type,
 
 	if (ret < 0)
 		goto buff_attr_exit;
-
-	if (strlen(str) == 0) {
-		pr_debug("Ignoring attribute with empty name\n");
-		ret = 0;
-		goto buff_attr_exit;
-	}
 
 	if (attr_type == HPWMI_PASSWORD_TYPE ||
 	    attr_type == HPWMI_SECURE_PLATFORM_TYPE)
@@ -1047,7 +1037,7 @@ err_release_attributes_data:
 	release_attributes_data();
 
 err_destroy_classdev:
-	device_unregister(bioscfg_drv.class_dev);
+	device_destroy(&firmware_attributes_class, MKDEV(0, 0));
 
 err_unregister_class:
 	hp_exit_attr_set_interface();
@@ -1058,7 +1048,7 @@ err_unregister_class:
 static void __exit hp_exit(void)
 {
 	release_attributes_data();
-	device_unregister(bioscfg_drv.class_dev);
+	device_destroy(&firmware_attributes_class, MKDEV(0, 0));
 
 	hp_exit_attr_set_interface();
 }

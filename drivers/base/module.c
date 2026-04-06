@@ -9,7 +9,7 @@
 #include <linux/string.h>
 #include "base.h"
 
-static char *make_driver_name(struct device_driver *drv)
+static char *make_driver_name(const struct device_driver *drv)
 {
 	char *driver_name;
 
@@ -30,7 +30,7 @@ static void module_create_drivers_dir(struct module_kobject *mk)
 	mutex_unlock(&drivers_dir_mutex);
 }
 
-int module_add_driver(struct module *mod, struct device_driver *drv)
+int module_add_driver(struct module *mod, const struct device_driver *drv)
 {
 	char *driver_name;
 	struct module_kobject *mk = NULL;
@@ -42,13 +42,16 @@ int module_add_driver(struct module *mod, struct device_driver *drv)
 	if (mod)
 		mk = &mod->mkobj;
 	else if (drv->mod_name) {
-		/* Lookup or create built-in module entry in /sys/modules */
-		mk = lookup_or_create_module_kobject(drv->mod_name);
-		if (mk) {
+		struct kobject *mkobj;
+
+		/* Lookup built-in module entry in /sys/modules */
+		mkobj = kset_find_obj(module_kset, drv->mod_name);
+		if (mkobj) {
+			mk = container_of(mkobj, struct module_kobject, kobj);
 			/* remember our module structure */
 			drv->p->mkobj = mk;
-			/* lookup_or_create_module_kobject took a reference */
-			kobject_put(&mk->kobj);
+			/* kset_find_obj took a reference */
+			kobject_put(mkobj);
 		}
 	}
 
@@ -90,7 +93,7 @@ out_remove_kobj:
 	return ret;
 }
 
-void module_remove_driver(struct device_driver *drv)
+void module_remove_driver(const struct device_driver *drv)
 {
 	struct module_kobject *mk = NULL;
 	char *driver_name;

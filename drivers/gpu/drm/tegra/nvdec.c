@@ -261,8 +261,10 @@ static int nvdec_load_falcon_firmware(struct nvdec *nvdec)
 
 	if (!client->group) {
 		virt = dma_alloc_coherent(nvdec->dev, size, &iova, GFP_KERNEL);
-		if (!virt)
-			return -ENOMEM;
+
+		err = dma_mapping_error(nvdec->dev, iova);
+		if (err < 0)
+			return err;
 	} else {
 		virt = tegra_drm_alloc(tegra, size, &iova);
 		if (IS_ERR(virt))
@@ -564,7 +566,7 @@ struct platform_driver tegra_nvdec_driver = {
 		.pm = &nvdec_pm_ops
 	},
 	.probe = nvdec_probe,
-	.remove_new = nvdec_remove,
+	.remove = nvdec_remove,
 };
 
 #if IS_ENABLED(CONFIG_ARCH_TEGRA_210_SOC)

@@ -21,13 +21,13 @@
 #include <linux/swap.h>
 #include <linux/slab.h>
 
-static struct bus_type node_subsys = {
+static const struct bus_type node_subsys = {
 	.name = "node",
 	.dev_name = "node",
 };
 
 static inline ssize_t cpumap_read(struct file *file, struct kobject *kobj,
-				  struct bin_attribute *attr, char *buf,
+				  const struct bin_attribute *attr, char *buf,
 				  loff_t off, size_t count)
 {
 	struct device *dev = kobj_to_dev(kobj);
@@ -45,10 +45,10 @@ static inline ssize_t cpumap_read(struct file *file, struct kobject *kobj,
 	return n;
 }
 
-static BIN_ATTR_RO(cpumap, CPUMAP_FILE_MAX_BYTES);
+static const BIN_ATTR_RO(cpumap, CPUMAP_FILE_MAX_BYTES);
 
 static inline ssize_t cpulist_read(struct file *file, struct kobject *kobj,
-				   struct bin_attribute *attr, char *buf,
+				   const struct bin_attribute *attr, char *buf,
 				   loff_t off, size_t count)
 {
 	struct device *dev = kobj_to_dev(kobj);
@@ -66,7 +66,7 @@ static inline ssize_t cpulist_read(struct file *file, struct kobject *kobj,
 	return n;
 }
 
-static BIN_ATTR_RO(cpulist, CPULIST_FILE_MAX_BYTES);
+static const BIN_ATTR_RO(cpulist, CPULIST_FILE_MAX_BYTES);
 
 /**
  * struct node_access_nodes - Access class device to hold user visible
@@ -215,6 +215,7 @@ void node_set_perf_attrs(unsigned int nid, struct access_coordinate *coord,
 		}
 	}
 }
+EXPORT_SYMBOL_GPL(node_set_perf_attrs);
 
 /**
  * struct node_cache_info - Internal tracking for memory node caches
@@ -577,7 +578,7 @@ static struct attribute *node_dev_attrs[] = {
 	NULL
 };
 
-static struct bin_attribute *node_dev_bin_attrs[] = {
+static const struct bin_attribute *node_dev_bin_attrs[] = {
 	&bin_attr_cpumap,
 	&bin_attr_cpulist,
 	NULL
@@ -585,7 +586,7 @@ static struct bin_attribute *node_dev_bin_attrs[] = {
 
 static const struct attribute_group node_dev_group = {
 	.attrs = node_dev_attrs,
-	.bin_attrs = node_dev_bin_attrs
+	.bin_attrs_new = node_dev_bin_attrs,
 };
 
 static const struct attribute_group *node_dev_groups[] = {
@@ -878,10 +879,6 @@ int __register_one_node(int nid)
 	node_devices[nid] = node;
 
 	error = register_node(node_devices[nid], nid);
-	if (error) {
-		node_devices[nid] = NULL;
-		return error;
-	}
 
 	/* link cpu under this node */
 	for_each_present_cpu(cpu) {

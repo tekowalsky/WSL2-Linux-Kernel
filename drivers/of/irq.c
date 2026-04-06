@@ -16,7 +16,6 @@
 
 #define pr_fmt(fmt)	"OF: " fmt
 
-#include <linux/cleanup.h>
 #include <linux/device.h>
 #include <linux/errno.h>
 #include <linux/list.h>
@@ -39,15 +38,11 @@
 unsigned int irq_of_parse_and_map(struct device_node *dev, int index)
 {
 	struct of_phandle_args oirq;
-	unsigned int ret;
 
 	if (of_irq_parse_one(dev, index, &oirq))
 		return 0;
 
-	ret = irq_create_of_mapping(&oirq);
-	of_node_put(oirq.np);
-
-	return ret;
+	return irq_create_of_mapping(&oirq);
 }
 EXPORT_SYMBOL_GPL(irq_of_parse_and_map);
 
@@ -170,15 +165,13 @@ const __be32 *of_irq_parse_imap_parent(const __be32 *imap, int len, struct of_ph
  * the specifier for each map, and then returns the translated map.
  *
  * Return: 0 on success and a negative number on error
- *
- * Note: refcount of node @out_irq->np is increased by 1 on success.
  */
 int of_irq_parse_raw(const __be32 *addr, struct of_phandle_args *out_irq)
 {
 	struct device_node *ipar, *tnode, *old = NULL;
 	__be32 initial_match_array[MAX_PHANDLE_ARGS];
 	const __be32 *match_array = initial_match_array;
-	const __be32 *tmp, dummy_imask[] = { [0 ... MAX_PHANDLE_ARGS] = cpu_to_be32(~0) };
+	const __be32 *tmp, dummy_imask[] = { [0 ... (MAX_PHANDLE_ARGS - 1)] = cpu_to_be32(~0) };
 	u32 intsize = 1, addrsize;
 	int i, rc = -EINVAL;
 
@@ -317,12 +310,6 @@ int of_irq_parse_raw(const __be32 *addr, struct of_phandle_args *out_irq)
 		addrsize = (imap - match_array) - intsize;
 
 		if (ipar == newpar) {
-			/*
-			 * We got @ipar's refcount, but the refcount was
-			 * gotten again by of_irq_parse_imap_parent() via its
-			 * alias @newpar.
-			 */
-			of_node_put(ipar);
 			pr_debug("%pOF interrupt-map entry to self\n", ipar);
 			return 0;
 		}
@@ -352,12 +339,10 @@ EXPORT_SYMBOL_GPL(of_irq_parse_raw);
  * This function resolves an interrupt for a node by walking the interrupt tree,
  * finding which interrupt controller node it is attached to, and returning the
  * interrupt specifier that can be used to retrieve a Linux IRQ number.
- *
- * Note: refcount of node @out_irq->np is increased by 1 on success.
  */
 int of_irq_parse_one(struct device_node *device, int index, struct of_phandle_args *out_irq)
 {
-	struct device_node __free(device_node) *p = NULL;
+	struct device_node *p;
 	const __be32 *addr;
 	u32 intsize;
 	int i, res, addr_len;
@@ -382,33 +367,41 @@ int of_irq_parse_one(struct device_node *device, int index, struct of_phandle_ar
 	/* Try the new-style interrupts-extended first */
 	res = of_parse_phandle_with_args(device, "interrupts-extended",
 					"#interrupt-cells", index, out_irq);
-	if (!res) {
-		p = out_irq->np;
-	} else {
-		/* Look for the interrupt parent. */
-		p = of_irq_find_parent(device);
-		/* Get size of interrupt specifier */
-		if (!p || of_property_read_u32(p, "#interrupt-cells", &intsize))
-			return -EINVAL;
+	if (!res)
+		return of_irq_parse_raw(addr_buf, out_irq);
 
-		pr_debug(" parent=%pOF, intsize=%d\n", p, intsize);
+	/* Look for the interrupt parent. */
+	p = of_irq_find_parent(device);
+	if (p == NULL)
+		return -EINVAL;
 
-		/* Copy intspec into irq structure */
-		out_irq->np = p;
-		out_irq->args_count = intsize;
-		for (i = 0; i < intsize; i++) {
-			res = of_property_read_u32_index(device, "interrupts",
-							(index * intsize) + i,
-							out_irq->args + i);
-			if (res)
-				return res;
-		}
-
-		pr_debug(" intspec=%d\n", *out_irq->args);
+	/* Get size of interrupt specifier */
+	if (of_property_read_u32(p, "#interrupt-cells", &intsize)) {
+		res = -EINVAL;
+		goto out;
 	}
 
+	pr_debug(" parent=%pOF, intsize=%d\n", p, intsize);
+
+	/* Copy intspec into irq structure */
+	out_irq->np = p;
+	out_irq->args_count = intsize;
+	for (i = 0; i < intsize; i++) {
+		res = of_property_read_u32_index(device, "interrupts",
+						 (index * intsize) + i,
+						 out_irq->args + i);
+		if (res)
+			goto out;
+	}
+
+	pr_debug(" intspec=%d\n", *out_irq->args);
+
+
 	/* Check if there are any interrupt-map translations to process */
-	return of_irq_parse_raw(addr_buf, out_irq);
+	res = of_irq_parse_raw(addr_buf, out_irq);
+ out:
+	of_node_put(p);
+	return res;
 }
 EXPORT_SYMBOL_GPL(of_irq_parse_one);
 
@@ -438,9 +431,8 @@ int of_irq_to_resource(struct device_node *dev, int index, struct resource *r)
 		of_property_read_string_index(dev, "interrupt-names", index,
 					      &name);
 
-		r->start = r->end = irq;
-		r->flags = IORESOURCE_IRQ | irqd_get_trigger_type(irq_get_irq_data(irq));
-		r->name = name ? name : of_node_full_name(dev);
+		*r = DEFINE_RES_IRQ_NAMED(irq, name ?: of_node_full_name(dev));
+		r->flags |= irq_get_trigger_type(irq);
 	}
 
 	return irq;
@@ -513,10 +505,8 @@ int of_irq_count(struct device_node *dev)
 	struct of_phandle_args irq;
 	int nr = 0;
 
-	while (of_irq_parse_one(dev, nr, &irq) == 0) {
-		of_node_put(irq.np);
+	while (of_irq_parse_one(dev, nr, &irq) == 0)
 		nr++;
-	}
 
 	return nr;
 }
@@ -633,8 +623,6 @@ void __init of_irq_init(const struct of_device_id *matches)
 				       __func__, desc->dev, desc->dev,
 				       desc->interrupt_parent);
 				of_node_clear_flag(desc->dev, OF_POPULATED);
-				of_node_put(desc->interrupt_parent);
-				of_node_put(desc->dev);
 				kfree(desc);
 				continue;
 			}
@@ -665,7 +653,6 @@ void __init of_irq_init(const struct of_device_id *matches)
 err:
 	list_for_each_entry_safe(desc, temp_desc, &intc_desc_list, list) {
 		list_del(&desc->list);
-		of_node_put(desc->interrupt_parent);
 		of_node_put(desc->dev);
 		kfree(desc);
 	}
@@ -735,7 +722,7 @@ struct irq_domain *of_msi_map_get_device_domain(struct device *dev, u32 id,
  * Returns: the MSI domain for this device (or NULL on failure).
  */
 struct irq_domain *of_msi_get_domain(struct device *dev,
-				     struct device_node *np,
+				     const struct device_node *np,
 				     enum irq_domain_bus_token token)
 {
 	struct of_phandle_iterator it;
@@ -757,7 +744,7 @@ EXPORT_SYMBOL_GPL(of_msi_get_domain);
  * @dev: device structure to associate with an MSI irq domain
  * @np: device node for that device
  */
-void of_msi_configure(struct device *dev, struct device_node *np)
+void of_msi_configure(struct device *dev, const struct device_node *np)
 {
 	dev_set_msi_domain(dev,
 			   of_msi_get_domain(dev, np, DOMAIN_BUS_PLATFORM_MSI));

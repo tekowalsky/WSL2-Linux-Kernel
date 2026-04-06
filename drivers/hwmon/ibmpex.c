@@ -256,12 +256,7 @@ static struct ibmpex_bmc_data *get_bmc_data(int iface)
 	return NULL;
 }
 
-static ssize_t name_show(struct device *dev, struct device_attribute *devattr,
-			 char *buf)
-{
-	return sprintf(buf, "%s\n", DRVNAME);
-}
-static SENSOR_DEVICE_ATTR_RO(name, name, 0);
+static DEVICE_STRING_ATTR_RO(name, 0444, DRVNAME);
 
 static ssize_t ibmpex_show_sensor(struct device *dev,
 				  struct device_attribute *devattr,
@@ -281,9 +276,6 @@ static ssize_t ibmpex_high_low_store(struct device *dev,
 				     const char *buf, size_t count)
 {
 	struct ibmpex_bmc_data *data = dev_get_drvdata(dev);
-
-	if (!data)
-		return -ENODEV;
 
 	ibmpex_reset_high_low_data(data);
 
@@ -418,8 +410,7 @@ static int ibmpex_find_sensors(struct ibmpex_bmc_data *data)
 	if (err)
 		goto exit_remove;
 
-	err = device_create_file(data->bmc_device,
-			&sensor_dev_attr_name.dev_attr);
+	err = device_create_file(data->bmc_device, &dev_attr_name.attr);
 	if (err)
 		goto exit_remove;
 
@@ -428,7 +419,7 @@ static int ibmpex_find_sensors(struct ibmpex_bmc_data *data)
 exit_remove:
 	device_remove_file(data->bmc_device,
 			   &sensor_dev_attr_reset_high_low.dev_attr);
-	device_remove_file(data->bmc_device, &sensor_dev_attr_name.dev_attr);
+	device_remove_file(data->bmc_device, &dev_attr_name.attr);
 	for (i = 0; i < data->num_sensors; i++)
 		for (j = 0; j < PEX_NUM_SENSOR_FUNCS; j++) {
 			if (!data->sensors[i].attr[j].dev_attr.attr.name)
@@ -517,12 +508,9 @@ static void ibmpex_bmc_delete(struct ibmpex_bmc_data *data)
 {
 	int i, j;
 
-	hwmon_device_unregister(data->hwmon_dev);
-	dev_set_drvdata(data->bmc_device, NULL);
-
 	device_remove_file(data->bmc_device,
 			   &sensor_dev_attr_reset_high_low.dev_attr);
-	device_remove_file(data->bmc_device, &sensor_dev_attr_name.dev_attr);
+	device_remove_file(data->bmc_device, &dev_attr_name.attr);
 	for (i = 0; i < data->num_sensors; i++)
 		for (j = 0; j < PEX_NUM_SENSOR_FUNCS; j++) {
 			if (!data->sensors[i].attr[j].dev_attr.attr.name)
@@ -533,7 +521,8 @@ static void ibmpex_bmc_delete(struct ibmpex_bmc_data *data)
 		}
 
 	list_del(&data->list);
-
+	dev_set_drvdata(data->bmc_device, NULL);
+	hwmon_device_unregister(data->hwmon_dev);
 	ipmi_destroy_user(data->user);
 	kfree(data->sensors);
 	kfree(data);

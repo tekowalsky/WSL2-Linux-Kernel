@@ -202,11 +202,6 @@ struct qfq_sched {
  */
 enum update_reason {enqueue, requeue};
 
-static bool cl_is_active(struct qfq_class *cl)
-{
-	return !list_empty(&cl->alist);
-}
-
 static struct qfq_class *qfq_find_class(struct Qdisc *sch, u32 classid)
 {
 	struct qfq_sched *q = qdisc_priv(sch);
@@ -218,7 +213,7 @@ static struct qfq_class *qfq_find_class(struct Qdisc *sch, u32 classid)
 	return container_of(clc, struct qfq_class, common);
 }
 
-static struct netlink_range_validation lmax_range = {
+static const struct netlink_range_validation lmax_range = {
 	.min = QFQ_MIN_LMAX,
 	.max = QFQ_MAX_LMAX,
 };
@@ -352,7 +347,7 @@ static void qfq_deactivate_class(struct qfq_sched *q, struct qfq_class *cl)
 	struct qfq_aggregate *agg = cl->agg;
 
 
-	list_del_init(&cl->alist); /* remove from RR queue of the aggregate */
+	list_del(&cl->alist); /* remove from RR queue of the aggregate */
 	if (list_empty(&agg->active)) /* agg is now inactive */
 		qfq_deactivate_agg(q, agg);
 }
@@ -373,7 +368,7 @@ static void qfq_rm_from_agg(struct qfq_sched *q, struct qfq_class *cl)
 /* Deschedule class and remove it from its parent aggregate. */
 static void qfq_deact_rm_from_agg(struct qfq_sched *q, struct qfq_class *cl)
 {
-	if (cl_is_active(cl)) /* class is active */
+	if (cl->qdisc->q.qlen > 0) /* class is active */
 		qfq_deactivate_class(q, cl);
 
 	qfq_rm_from_agg(q, cl);
@@ -412,7 +407,7 @@ static int qfq_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 	bool existing = false;
 	struct nlattr *tb[TCA_QFQ_MAX + 1];
 	struct qfq_aggregate *new_agg = NULL;
-	u32 weight, lmax, inv_w, old_weight, old_lmax;
+	u32 weight, lmax, inv_w;
 	int err;
 	int delta_w;
 
@@ -426,10 +421,7 @@ static int qfq_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 	if (err < 0)
 		return err;
 
-	if (tb[TCA_QFQ_WEIGHT])
-		weight = nla_get_u32(tb[TCA_QFQ_WEIGHT]);
-	else
-		weight = 1;
+	weight = nla_get_u32_default(tb[TCA_QFQ_WEIGHT], 1);
 
 	if (tb[TCA_QFQ_LMAX]) {
 		lmax = nla_get_u32(tb[TCA_QFQ_LMAX]);
@@ -446,16 +438,12 @@ static int qfq_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 	inv_w = ONE_FP / weight;
 	weight = ONE_FP / inv_w;
 
-	if (cl != NULL) {
-		sch_tree_lock(sch);
-		old_weight = cl->agg->class_weight;
-		old_lmax   = cl->agg->lmax;
-		sch_tree_unlock(sch);
-		if (lmax == old_lmax && weight == old_weight)
-			return 0; /* nothing to change */
-	}
+	if (cl != NULL &&
+	    lmax == cl->agg->lmax &&
+	    weight == cl->agg->class_weight)
+		return 0; /* nothing to change */
 
-	delta_w = weight - (cl ? old_weight : 0);
+	delta_w = weight - (cl ? cl->agg->class_weight : 0);
 
 	if (q->wsum + delta_w > QFQ_MAX_WSUM) {
 		NL_SET_ERR_MSG_FMT_MOD(extack,
@@ -486,7 +474,6 @@ static int qfq_change_class(struct Qdisc *sch, u32 classid, u32 parentid,
 	gnet_stats_basic_sync_init(&cl->bstats);
 	cl->common.classid = classid;
 	cl->deficit = lmax;
-	INIT_LIST_HEAD(&cl->alist);
 
 	cl->qdisc = qdisc_create_dflt(sch->dev_queue, &pfifo_qdisc_ops,
 				      classid, NULL);
@@ -532,15 +519,16 @@ set_change_agg:
 	return 0;
 
 destroy_class:
-	if (!existing) {
-		qdisc_put(cl->qdisc);
-		kfree(cl);
-	}
+	qdisc_put(cl->qdisc);
+	kfree(cl);
 	return err;
 }
 
 static void qfq_destroy_class(struct Qdisc *sch, struct qfq_class *cl)
 {
+	struct qfq_sched *q = qdisc_priv(sch);
+
+	qfq_rm_from_agg(q, cl);
 	gen_kill_estimator(&cl->rate_est);
 	qdisc_put(cl->qdisc);
 	kfree(cl);
@@ -561,7 +549,6 @@ static int qfq_delete_class(struct Qdisc *sch, unsigned long arg,
 
 	qdisc_purge_queue(cl->qdisc);
 	qdisc_class_hash_remove(&q->clhash, &cl->common);
-	qfq_rm_from_agg(q, cl);
 
 	sch_tree_unlock(sch);
 
@@ -632,7 +619,6 @@ static int qfq_dump_class(struct Qdisc *sch, unsigned long arg,
 {
 	struct qfq_class *cl = (struct qfq_class *)arg;
 	struct nlattr *nest;
-	u32 class_weight, lmax;
 
 	tcm->tcm_parent	= TC_H_ROOT;
 	tcm->tcm_handle	= cl->common.classid;
@@ -641,13 +627,8 @@ static int qfq_dump_class(struct Qdisc *sch, unsigned long arg,
 	nest = nla_nest_start_noflag(skb, TCA_OPTIONS);
 	if (nest == NULL)
 		goto nla_put_failure;
-
-	sch_tree_lock(sch);
-	class_weight	= cl->agg->class_weight;
-	lmax		= cl->agg->lmax;
-	sch_tree_unlock(sch);
-	if (nla_put_u32(skb, TCA_QFQ_WEIGHT, class_weight) ||
-	    nla_put_u32(skb, TCA_QFQ_LMAX, lmax))
+	if (nla_put_u32(skb, TCA_QFQ_WEIGHT, cl->agg->class_weight) ||
+	    nla_put_u32(skb, TCA_QFQ_LMAX, cl->agg->lmax))
 		goto nla_put_failure;
 	return nla_nest_end(skb, nest);
 
@@ -664,10 +645,8 @@ static int qfq_dump_class_stats(struct Qdisc *sch, unsigned long arg,
 
 	memset(&xstats, 0, sizeof(xstats));
 
-	sch_tree_lock(sch);
 	xstats.weight = cl->agg->class_weight;
 	xstats.lmax = cl->agg->lmax;
-	sch_tree_unlock(sch);
 
 	if (gnet_stats_copy_basic(d, NULL, &cl->bstats, true) < 0 ||
 	    gnet_stats_copy_rate_est(d, &cl->rate_est) < 0 ||
@@ -1003,8 +982,8 @@ static struct sk_buff *agg_dequeue(struct qfq_aggregate *agg,
 	cl->deficit -= (int) len;
 
 	if (cl->qdisc->q.qlen == 0) /* no more packets, remove from list */
-		list_del_init(&cl->alist);
-	else if (cl->deficit < qdisc_peek_len(cl->qdisc)) {
+		list_del(&cl->alist);
+	else if (cl->deficit < qdisc_pkt_len(cl->qdisc->ops->peek(cl->qdisc))) {
 		cl->deficit += agg->lmax;
 		list_move_tail(&cl->alist, &agg->active);
 	}
@@ -1021,7 +1000,7 @@ static inline struct sk_buff *qfq_peek_skb(struct qfq_aggregate *agg,
 	*cl = list_first_entry(&agg->active, struct qfq_class, alist);
 	skb = (*cl)->qdisc->ops->peek((*cl)->qdisc);
 	if (skb == NULL)
-		WARN_ONCE(1, "qfq_dequeue: non-workconserving leaf\n");
+		qdisc_warn_nonwc("qfq_dequeue", (*cl)->qdisc);
 	else
 		*len = qdisc_pkt_len(skb);
 
@@ -1235,6 +1214,7 @@ static int qfq_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 	struct qfq_class *cl;
 	struct qfq_aggregate *agg;
 	int err = 0;
+	bool first;
 
 	cl = qfq_classify(skb, sch, &err);
 	if (cl == NULL) {
@@ -1256,6 +1236,7 @@ static int qfq_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 	}
 
 	gso_segs = skb_is_gso(skb) ? skb_shinfo(skb)->gso_segs : 1;
+	first = !cl->qdisc->q.qlen;
 	err = qdisc_enqueue(skb, cl->qdisc, to_free);
 	if (unlikely(err != NET_XMIT_SUCCESS)) {
 		pr_debug("qfq_enqueue: enqueue failed %d\n", err);
@@ -1271,8 +1252,8 @@ static int qfq_enqueue(struct sk_buff *skb, struct Qdisc *sch,
 	++sch->q.qlen;
 
 	agg = cl->agg;
-	/* if the class is active, then done here */
-	if (cl_is_active(cl)) {
+	/* if the queue was not empty, then done here */
+	if (!first) {
 		if (unlikely(skb == cl->qdisc->ops->peek(cl->qdisc)) &&
 		    list_first_entry(&agg->active, struct qfq_class, alist)
 		    == cl && cl->deficit < len)
@@ -1434,8 +1415,6 @@ static void qfq_qlen_notify(struct Qdisc *sch, unsigned long arg)
 	struct qfq_sched *q = qdisc_priv(sch);
 	struct qfq_class *cl = (struct qfq_class *)arg;
 
-	if (list_empty(&cl->alist))
-		return;
 	qfq_deactivate_class(q, cl);
 }
 
@@ -1486,7 +1465,7 @@ static void qfq_reset_qdisc(struct Qdisc *sch)
 
 	for (i = 0; i < q->clhash.hashsize; i++) {
 		hlist_for_each_entry(cl, &q->clhash.hash[i], common.hnode) {
-			if (cl_is_active(cl))
+			if (cl->qdisc->q.qlen > 0)
 				qfq_deactivate_class(q, cl);
 
 			qdisc_reset(cl->qdisc);
@@ -1506,7 +1485,6 @@ static void qfq_destroy_qdisc(struct Qdisc *sch)
 	for (i = 0; i < q->clhash.hashsize; i++) {
 		hlist_for_each_entry_safe(cl, next, &q->clhash.hash[i],
 					  common.hnode) {
-			qfq_rm_from_agg(q, cl);
 			qfq_destroy_class(sch, cl);
 		}
 	}
@@ -1540,6 +1518,7 @@ static struct Qdisc_ops qfq_qdisc_ops __read_mostly = {
 	.destroy	= qfq_destroy_qdisc,
 	.owner		= THIS_MODULE,
 };
+MODULE_ALIAS_NET_SCH("qfq");
 
 static int __init qfq_init(void)
 {
@@ -1554,3 +1533,4 @@ static void __exit qfq_exit(void)
 module_init(qfq_init);
 module_exit(qfq_exit);
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Quick Fair Queueing Plus qdisc");

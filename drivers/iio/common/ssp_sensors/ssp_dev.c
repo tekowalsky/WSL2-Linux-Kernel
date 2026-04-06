@@ -205,7 +205,7 @@ u32 ssp_get_sensor_delay(struct ssp_data *data, enum ssp_sensor_type type)
 {
 	return data->delay_buf[type];
 }
-EXPORT_SYMBOL_NS(ssp_get_sensor_delay, IIO_SSP_SENSORS);
+EXPORT_SYMBOL_NS(ssp_get_sensor_delay, "IIO_SSP_SENSORS");
 
 /**
  * ssp_enable_sensor() - enables data acquisition for sensor
@@ -267,7 +267,7 @@ int ssp_enable_sensor(struct ssp_data *data, enum ssp_sensor_type type,
 derror:
 	return ret;
 }
-EXPORT_SYMBOL_NS(ssp_enable_sensor, IIO_SSP_SENSORS);
+EXPORT_SYMBOL_NS(ssp_enable_sensor, "IIO_SSP_SENSORS");
 
 /**
  * ssp_change_delay() - changes data acquisition for sensor
@@ -298,7 +298,7 @@ int ssp_change_delay(struct ssp_data *data, enum ssp_sensor_type type,
 
 	return 0;
 }
-EXPORT_SYMBOL_NS(ssp_change_delay, IIO_SSP_SENSORS);
+EXPORT_SYMBOL_NS(ssp_change_delay, "IIO_SSP_SENSORS");
 
 /**
  * ssp_disable_sensor() - disables sensor
@@ -335,7 +335,7 @@ int ssp_disable_sensor(struct ssp_data *data, enum ssp_sensor_type type)
 
 	return 0;
 }
-EXPORT_SYMBOL_NS(ssp_disable_sensor, IIO_SSP_SENSORS);
+EXPORT_SYMBOL_NS(ssp_disable_sensor, "IIO_SSP_SENSORS");
 
 static irqreturn_t ssp_irq_thread_fn(int irq, void *dev_id)
 {
@@ -478,7 +478,7 @@ void ssp_register_consumer(struct iio_dev *indio_dev, enum ssp_sensor_type type)
 
 	data->sensor_devs[type] = indio_dev;
 }
-EXPORT_SYMBOL_NS(ssp_register_consumer, IIO_SSP_SENSORS);
+EXPORT_SYMBOL_NS(ssp_register_consumer, "IIO_SSP_SENSORS");
 
 static int ssp_probe(struct spi_device *spi)
 {
@@ -503,7 +503,7 @@ static int ssp_probe(struct spi_device *spi)
 	ret = spi_setup(spi);
 	if (ret < 0) {
 		dev_err(&spi->dev, "Failed to setup spi\n");
-		goto err_setup_spi;
+		return ret;
 	}
 
 	data->fw_dl_state = SSP_FW_DL_STATE_NONE;
@@ -568,8 +568,6 @@ err_read_reg:
 err_setup_irq:
 	mutex_destroy(&data->pending_lock);
 	mutex_destroy(&data->comm_lock);
-err_setup_spi:
-	mfd_remove_devices(&spi->dev);
 
 	dev_err(&spi->dev, "Probe failed!\n");
 

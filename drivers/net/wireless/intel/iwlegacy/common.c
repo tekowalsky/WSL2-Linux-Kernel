@@ -541,6 +541,9 @@ il_leds_init(struct il_priv *il)
 
 	il->led.name =
 	    kasprintf(GFP_KERNEL, "%s-led", wiphy_name(il->hw->wiphy));
+	if (!il->led.name)
+		return;
+
 	il->led.brightness_set = il_led_brightness_set;
 	il->led.blink_set = il_led_blink_set;
 	il->led.max_brightness = 1;
@@ -3446,9 +3449,7 @@ il_init_geos(struct il_priv *il)
 	if (!channels)
 		return -ENOMEM;
 
-	rates =
-	    kzalloc((sizeof(struct ieee80211_rate) * RATE_COUNT_LEGACY),
-		    GFP_KERNEL);
+	rates = kcalloc(RATE_COUNT_LEGACY, sizeof(*rates), GFP_KERNEL);
 	if (!rates) {
 		kfree(channels);
 		return -ENOMEM;
@@ -3914,37 +3915,6 @@ il_set_rxon_ht(struct il_priv *il, struct il_ht_config *ht_conf)
 }
 EXPORT_SYMBOL(il_set_rxon_ht);
 
-/* Return valid, unused, channel for a passive scan to reset the RF */
-u8
-il_get_single_channel_number(struct il_priv *il, enum nl80211_band band)
-{
-	const struct il_channel_info *ch_info;
-	int i;
-	u8 channel = 0;
-	u8 min, max;
-
-	if (band == NL80211_BAND_5GHZ) {
-		min = 14;
-		max = il->channel_count;
-	} else {
-		min = 0;
-		max = 14;
-	}
-
-	for (i = min; i < max; i++) {
-		channel = il->channel_info[i].channel;
-		if (channel == le16_to_cpu(il->staging.channel))
-			continue;
-
-		ch_info = il_get_channel_info(il, band, channel);
-		if (il_is_channel_valid(ch_info))
-			break;
-	}
-
-	return channel;
-}
-EXPORT_SYMBOL(il_get_single_channel_number);
-
 /*
  * il_set_rxon_channel - Set the band and channel values in staging RXON
  * @ch: requested channel as a pointer to struct ieee80211_channel
@@ -4101,7 +4071,7 @@ il_chswitch_done(struct il_priv *il, bool is_success)
 		return;
 
 	if (test_and_clear_bit(S_CHANNEL_SWITCH_PENDING, &il->status))
-		ieee80211_chswitch_done(il->vif, is_success);
+		ieee80211_chswitch_done(il->vif, is_success, 0);
 }
 EXPORT_SYMBOL(il_chswitch_done);
 

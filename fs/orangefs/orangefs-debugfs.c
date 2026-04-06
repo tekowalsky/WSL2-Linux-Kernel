@@ -206,8 +206,8 @@ static void orangefs_kernel_debug_init(void)
 		pr_info("%s: overflow 1!\n", __func__);
 	}
 
-	debugfs_create_file(ORANGEFS_KMOD_DEBUG_FILE, 0444, debug_dir, k_buffer,
-			    &kernel_debug_fops);
+	debugfs_create_file_aux_num(ORANGEFS_KMOD_DEBUG_FILE, 0444, debug_dir, k_buffer,
+			    0, &kernel_debug_fops);
 }
 
 
@@ -306,11 +306,10 @@ static void orangefs_client_debug_init(void)
 		pr_info("%s: overflow! 2\n", __func__);
 	}
 
-	client_debug_dentry = debugfs_create_file(ORANGEFS_CLIENT_DEBUG_FILE,
-						  0444,
-						  debug_dir,
-						  c_buffer,
-						  &kernel_debug_fops);
+	client_debug_dentry = debugfs_create_file_aux_num(
+					  ORANGEFS_CLIENT_DEBUG_FILE,
+					  0444, debug_dir, c_buffer, 1,
+					  &kernel_debug_fops);
 }
 
 /* open ORANGEFS_KMOD_DEBUG_FILE or ORANGEFS_CLIENT_DEBUG_FILE.*/
@@ -354,7 +353,7 @@ static ssize_t orangefs_debug_read(struct file *file,
 		goto out;
 
 	mutex_lock(&orangefs_debug_lock);
-	sprintf_ret = scnprintf(buf, ORANGEFS_MAX_DEBUG_STRING_LEN, "%s", (char *)file->private_data);
+	sprintf_ret = sprintf(buf, "%s", (char *)file->private_data);
 	mutex_unlock(&orangefs_debug_lock);
 
 	read_ret = simple_read_from_buffer(ubuf, count, ppos, buf, sprintf_ret);
@@ -418,8 +417,7 @@ static ssize_t orangefs_debug_write(struct file *file,
 	 * A service operation is required to set a new client-side
 	 * debug mask.
 	 */
-	if (!strcmp(file->f_path.dentry->d_name.name,
-		    ORANGEFS_KMOD_DEBUG_FILE)) {
+	if (!debugfs_get_aux_num(file)) {	// kernel-debug
 		debug_string_to_mask(buf, &orangefs_gossip_debug_mask, 0);
 		debug_mask_to_string(&orangefs_gossip_debug_mask, 0);
 		debug_string = kernel_debug_string;
@@ -728,8 +726,8 @@ static void do_k_string(void *k_mask, int index)
 
 	if (*mask & s_kmod_keyword_mask_map[index].mask_val) {
 		if ((strlen(kernel_debug_string) +
-		     strlen(s_kmod_keyword_mask_map[index].keyword) + 1)
-			< ORANGEFS_MAX_DEBUG_STRING_LEN) {
+		     strlen(s_kmod_keyword_mask_map[index].keyword))
+			< ORANGEFS_MAX_DEBUG_STRING_LEN - 1) {
 				strcat(kernel_debug_string,
 				       s_kmod_keyword_mask_map[index].keyword);
 				strcat(kernel_debug_string, ",");
@@ -756,7 +754,7 @@ static void do_c_string(void *c_mask, int index)
 	    (mask->mask2 & cdm_array[index].mask2)) {
 		if ((strlen(client_debug_string) +
 		     strlen(cdm_array[index].keyword) + 1)
-			< ORANGEFS_MAX_DEBUG_STRING_LEN) {
+			< ORANGEFS_MAX_DEBUG_STRING_LEN - 2) {
 				strcat(client_debug_string,
 				       cdm_array[index].keyword);
 				strcat(client_debug_string, ",");

@@ -50,6 +50,7 @@
 #define STM32F7_I2C_TXDR			0x28
 
 /* STM32F7 I2C control 1 */
+#define STM32_I2C_CR1_FMP			BIT(24)
 #define STM32F7_I2C_CR1_PECEN			BIT(23)
 #define STM32F7_I2C_CR1_ALERTEN			BIT(22)
 #define STM32F7_I2C_CR1_SMBHEN			BIT(20)
@@ -226,6 +227,8 @@ struct stm32f7_i2c_spec {
  * @rise_time: Rise time (ns)
  * @fall_time: Fall time (ns)
  * @fmp_clr_offset: Fast Mode Plus clear register offset from set register
+ * @single_it_line: Only a single IT line is used for both events/errors
+ * @fmp_cr1_bit: Fast Mode Plus control is done via a bit in CR1
  */
 struct stm32f7_i2c_setup {
 	u32 speed_freq;
@@ -233,6 +236,8 @@ struct stm32f7_i2c_setup {
 	u32 rise_time;
 	u32 fall_time;
 	u32 fmp_clr_offset;
+	bool single_it_line;
+	bool fmp_cr1_bit;
 };
 
 /**
@@ -325,6 +330,7 @@ struct stm32f7_i2c_alert {
  * @dnf_dt: value of digital filter requested via dt
  * @dnf: value of digital filter to apply
  * @alert: SMBus alert specific data
+ * @atomic: boolean indicating that current transfer is atomic
  */
 struct stm32f7_i2c_dev {
 	struct i2c_adapter adap;
@@ -415,6 +421,13 @@ static const struct stm32f7_i2c_setup stm32mp13_setup = {
 	.rise_time = STM32F7_I2C_RISE_TIME_DEFAULT,
 	.fall_time = STM32F7_I2C_FALL_TIME_DEFAULT,
 	.fmp_clr_offset = 0x4,
+};
+
+static const struct stm32f7_i2c_setup stm32mp25_setup = {
+	.rise_time = STM32F7_I2C_RISE_TIME_DEFAULT,
+	.fall_time = STM32F7_I2C_FALL_TIME_DEFAULT,
+	.single_it_line = true,
+	.fmp_cr1_bit = true,
 };
 
 static inline void stm32f7_i2c_set_bits(void __iomem *reg, u32 mask)
@@ -726,13 +739,12 @@ static void stm32f7_i2c_disable_dma_req(struct stm32f7_i2c_dev *i2c_dev)
 
 static void stm32f7_i2c_dma_callback(void *arg)
 {
-	struct stm32f7_i2c_dev *i2c_dev = arg;
+	struct stm32f7_i2c_dev *i2c_dev = (struct stm32f7_i2c_dev *)arg;
 	struct stm32_i2c_dma *dma = i2c_dev->dma;
+	struct device *dev = dma->chan_using->device->dev;
 
 	stm32f7_i2c_disable_dma_req(i2c_dev);
-	dmaengine_terminate_async(dma->chan_using);
-	dma_unmap_single(i2c_dev->dev, dma->dma_buf, dma->dma_len,
-			 dma->dma_data_dir);
+	dma_unmap_single(dev, dma->dma_buf, dma->dma_len, dma->dma_data_dir);
 	complete(&dma->dma_complete);
 }
 
@@ -1419,14 +1431,12 @@ static bool stm32f7_i2c_is_slave_busy(struct stm32f7_i2c_dev *i2c_dev)
 	return i == busy;
 }
 
-static irqreturn_t stm32f7_i2c_slave_isr_event(struct stm32f7_i2c_dev *i2c_dev)
+static irqreturn_t stm32f7_i2c_slave_isr_event(struct stm32f7_i2c_dev *i2c_dev, u32 status)
 {
 	void __iomem *base = i2c_dev->base;
-	u32 cr2, status, mask;
+	u32 cr2, mask;
 	u8 val;
 	int ret;
-
-	status = readl_relaxed(i2c_dev->base + STM32F7_I2C_ISR);
 
 	/* Slave transmitter mode */
 	if (status & STM32F7_I2C_ISR_TXIS) {
@@ -1494,116 +1504,13 @@ static irqreturn_t stm32f7_i2c_slave_isr_event(struct stm32f7_i2c_dev *i2c_dev)
 	return IRQ_HANDLED;
 }
 
-static irqreturn_t stm32f7_i2c_isr_event(int irq, void *data)
+static irqreturn_t stm32f7_i2c_handle_isr_errs(struct stm32f7_i2c_dev *i2c_dev, u32 status)
 {
-	struct stm32f7_i2c_dev *i2c_dev = data;
-	u32 status;
-
-	/* Check if the interrupt is for a slave device */
-	if (!i2c_dev->master_mode)
-		return IRQ_WAKE_THREAD;
-
-	status = readl_relaxed(i2c_dev->base + STM32F7_I2C_ISR);
-
-	/* Tx empty */
-	if (status & STM32F7_I2C_ISR_TXIS)
-		stm32f7_i2c_write_tx_data(i2c_dev);
-
-	/* RX not empty */
-	if (status & STM32F7_I2C_ISR_RXNE)
-		stm32f7_i2c_read_rx_data(i2c_dev);
-
-	/* Wake up the thread if other flags are raised */
-	if (status &
-	    (STM32F7_I2C_ISR_NACKF | STM32F7_I2C_ISR_STOPF |
-	     STM32F7_I2C_ISR_TC | STM32F7_I2C_ISR_TCR))
-		return IRQ_WAKE_THREAD;
-
-	return IRQ_HANDLED;
-}
-
-static irqreturn_t stm32f7_i2c_isr_event_thread(int irq, void *data)
-{
-	struct stm32f7_i2c_dev *i2c_dev = data;
-	struct stm32f7_i2c_msg *f7_msg = &i2c_dev->f7_msg;
-	void __iomem *base = i2c_dev->base;
-	u32 status, mask;
-	int ret;
-
-	if (!i2c_dev->master_mode)
-		return stm32f7_i2c_slave_isr_event(i2c_dev);
-
-	status = readl_relaxed(i2c_dev->base + STM32F7_I2C_ISR);
-
-	/* NACK received */
-	if (status & STM32F7_I2C_ISR_NACKF) {
-		dev_dbg(i2c_dev->dev, "<%s>: Receive NACK (addr %x)\n",
-			__func__, f7_msg->addr);
-		writel_relaxed(STM32F7_I2C_ICR_NACKCF, base + STM32F7_I2C_ICR);
-		if (i2c_dev->use_dma)
-			stm32f7_i2c_dma_callback(i2c_dev);
-		f7_msg->result = -ENXIO;
-	}
-
-	if (status & STM32F7_I2C_ISR_TCR) {
-		if (f7_msg->smbus)
-			stm32f7_i2c_smbus_reload(i2c_dev);
-		else
-			stm32f7_i2c_reload(i2c_dev);
-	}
-
-	/* Transfer complete */
-	if (status & STM32F7_I2C_ISR_TC) {
-		/* Wait for dma transfer completion before sending next message */
-		if (i2c_dev->use_dma && !f7_msg->result) {
-			ret = wait_for_completion_timeout(&i2c_dev->dma->dma_complete, HZ);
-			if (!ret) {
-				dev_dbg(i2c_dev->dev, "<%s>: Timed out\n", __func__);
-				stm32f7_i2c_dma_callback(i2c_dev);
-				f7_msg->result = -ETIMEDOUT;
-			}
-		}
-		if (f7_msg->stop) {
-			mask = STM32F7_I2C_CR2_STOP;
-			stm32f7_i2c_set_bits(base + STM32F7_I2C_CR2, mask);
-		} else if (f7_msg->smbus) {
-			stm32f7_i2c_smbus_rep_start(i2c_dev);
-		} else {
-			i2c_dev->msg_id++;
-			i2c_dev->msg++;
-			stm32f7_i2c_xfer_msg(i2c_dev, i2c_dev->msg);
-		}
-	}
-
-	/* STOP detection flag */
-	if (status & STM32F7_I2C_ISR_STOPF) {
-		/* Disable interrupts */
-		if (stm32f7_i2c_is_slave_registered(i2c_dev))
-			mask = STM32F7_I2C_XFER_IRQ_MASK;
-		else
-			mask = STM32F7_I2C_ALL_IRQ_MASK;
-		stm32f7_i2c_disable_irq(i2c_dev, mask);
-
-		/* Clear STOP flag */
-		writel_relaxed(STM32F7_I2C_ICR_STOPCF, base + STM32F7_I2C_ICR);
-
-		i2c_dev->master_mode = false;
-		complete(&i2c_dev->complete);
-	}
-
-	return IRQ_HANDLED;
-}
-
-static irqreturn_t stm32f7_i2c_isr_error_thread(int irq, void *data)
-{
-	struct stm32f7_i2c_dev *i2c_dev = data;
 	struct stm32f7_i2c_msg *f7_msg = &i2c_dev->f7_msg;
 	u16 addr = f7_msg->addr;
 	void __iomem *base = i2c_dev->base;
 	struct device *dev = i2c_dev->dev;
-	u32 status;
-
-	status = readl_relaxed(i2c_dev->base + STM32F7_I2C_ISR);
+	struct stm32_i2c_dma *dma = i2c_dev->dma;
 
 	/* Bus error */
 	if (status & STM32F7_I2C_ISR_BERR) {
@@ -1644,13 +1551,139 @@ static irqreturn_t stm32f7_i2c_isr_error_thread(int irq, void *data)
 	}
 
 	/* Disable dma */
-	if (i2c_dev->use_dma)
-		stm32f7_i2c_dma_callback(i2c_dev);
+	if (i2c_dev->use_dma) {
+		stm32f7_i2c_disable_dma_req(i2c_dev);
+		dmaengine_terminate_async(dma->chan_using);
+	}
 
 	i2c_dev->master_mode = false;
 	complete(&i2c_dev->complete);
 
 	return IRQ_HANDLED;
+}
+
+#define STM32F7_ERR_EVENTS (STM32F7_I2C_ISR_BERR | STM32F7_I2C_ISR_ARLO |\
+			    STM32F7_I2C_ISR_PECERR | STM32F7_I2C_ISR_ALERT)
+static irqreturn_t stm32f7_i2c_isr_event(int irq, void *data)
+{
+	struct stm32f7_i2c_dev *i2c_dev = data;
+	u32 status;
+
+	status = readl_relaxed(i2c_dev->base + STM32F7_I2C_ISR);
+
+	/*
+	 * Check if the interrupt is for a slave device or related
+	 * to errors flags (in case of single it line mode)
+	 */
+	if (!i2c_dev->master_mode ||
+	    (i2c_dev->setup.single_it_line && (status & STM32F7_ERR_EVENTS)))
+		return IRQ_WAKE_THREAD;
+
+	/* Tx empty */
+	if (status & STM32F7_I2C_ISR_TXIS)
+		stm32f7_i2c_write_tx_data(i2c_dev);
+
+	/* RX not empty */
+	if (status & STM32F7_I2C_ISR_RXNE)
+		stm32f7_i2c_read_rx_data(i2c_dev);
+
+	/* Wake up the thread if other flags are raised */
+	if (status &
+	    (STM32F7_I2C_ISR_NACKF | STM32F7_I2C_ISR_STOPF |
+	     STM32F7_I2C_ISR_TC | STM32F7_I2C_ISR_TCR))
+		return IRQ_WAKE_THREAD;
+
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t stm32f7_i2c_isr_event_thread(int irq, void *data)
+{
+	struct stm32f7_i2c_dev *i2c_dev = data;
+	struct stm32f7_i2c_msg *f7_msg = &i2c_dev->f7_msg;
+	struct stm32_i2c_dma *dma = i2c_dev->dma;
+	void __iomem *base = i2c_dev->base;
+	u32 status, mask;
+	int ret;
+
+	status = readl_relaxed(i2c_dev->base + STM32F7_I2C_ISR);
+
+	if (!i2c_dev->master_mode)
+		return stm32f7_i2c_slave_isr_event(i2c_dev, status);
+
+	/* Handle errors in case of this handler is used for events/errors */
+	if (i2c_dev->setup.single_it_line && (status & STM32F7_ERR_EVENTS))
+		return stm32f7_i2c_handle_isr_errs(i2c_dev, status);
+
+	/* NACK received */
+	if (status & STM32F7_I2C_ISR_NACKF) {
+		dev_dbg(i2c_dev->dev, "<%s>: Receive NACK (addr %x)\n",
+			__func__, f7_msg->addr);
+		writel_relaxed(STM32F7_I2C_ICR_NACKCF, base + STM32F7_I2C_ICR);
+		if (i2c_dev->use_dma) {
+			stm32f7_i2c_disable_dma_req(i2c_dev);
+			dmaengine_terminate_async(dma->chan_using);
+		}
+		f7_msg->result = -ENXIO;
+	}
+
+	if (status & STM32F7_I2C_ISR_TCR) {
+		if (f7_msg->smbus)
+			stm32f7_i2c_smbus_reload(i2c_dev);
+		else
+			stm32f7_i2c_reload(i2c_dev);
+	}
+
+	/* Transfer complete */
+	if (status & STM32F7_I2C_ISR_TC) {
+		/* Wait for dma transfer completion before sending next message */
+		if (i2c_dev->use_dma && !f7_msg->result) {
+			ret = wait_for_completion_timeout(&i2c_dev->dma->dma_complete, HZ);
+			if (!ret) {
+				dev_dbg(i2c_dev->dev, "<%s>: Timed out\n", __func__);
+				stm32f7_i2c_disable_dma_req(i2c_dev);
+				dmaengine_terminate_async(dma->chan_using);
+				f7_msg->result = -ETIMEDOUT;
+			}
+		}
+		if (f7_msg->stop) {
+			mask = STM32F7_I2C_CR2_STOP;
+			stm32f7_i2c_set_bits(base + STM32F7_I2C_CR2, mask);
+		} else if (f7_msg->smbus) {
+			stm32f7_i2c_smbus_rep_start(i2c_dev);
+		} else {
+			i2c_dev->msg_id++;
+			i2c_dev->msg++;
+			stm32f7_i2c_xfer_msg(i2c_dev, i2c_dev->msg);
+		}
+	}
+
+	/* STOP detection flag */
+	if (status & STM32F7_I2C_ISR_STOPF) {
+		/* Disable interrupts */
+		if (stm32f7_i2c_is_slave_registered(i2c_dev))
+			mask = STM32F7_I2C_XFER_IRQ_MASK;
+		else
+			mask = STM32F7_I2C_ALL_IRQ_MASK;
+		stm32f7_i2c_disable_irq(i2c_dev, mask);
+
+		/* Clear STOP flag */
+		writel_relaxed(STM32F7_I2C_ICR_STOPCF, base + STM32F7_I2C_ICR);
+
+		i2c_dev->master_mode = false;
+		complete(&i2c_dev->complete);
+	}
+
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t stm32f7_i2c_isr_error_thread(int irq, void *data)
+{
+	struct stm32f7_i2c_dev *i2c_dev = data;
+	u32 status;
+
+	status = readl_relaxed(i2c_dev->base + STM32F7_I2C_ISR);
+
+	return stm32f7_i2c_handle_isr_errs(i2c_dev, status);
 }
 
 static int stm32f7_i2c_wait_polling(struct stm32f7_i2c_dev *i2c_dev)
@@ -1756,7 +1789,7 @@ static int stm32f7_i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
 	struct stm32f7_i2c_msg *f7_msg = &i2c_dev->f7_msg;
 	struct stm32_i2c_dma *dma = i2c_dev->dma;
 	struct device *dev = i2c_dev->dev;
-	unsigned long timeout;
+	unsigned long time_left;
 	int i, ret;
 
 	f7_msg->addr = addr;
@@ -1776,8 +1809,8 @@ static int stm32f7_i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
 	if (ret)
 		goto pm_free;
 
-	timeout = wait_for_completion_timeout(&i2c_dev->complete,
-					      i2c_dev->adap.timeout);
+	time_left = wait_for_completion_timeout(&i2c_dev->complete,
+						i2c_dev->adap.timeout);
 	ret = f7_msg->result;
 	if (ret) {
 		if (i2c_dev->use_dma)
@@ -1793,7 +1826,7 @@ static int stm32f7_i2c_smbus_xfer(struct i2c_adapter *adapter, u16 addr,
 		goto pm_free;
 	}
 
-	if (!timeout) {
+	if (!time_left) {
 		dev_dbg(dev, "Access to slave 0x%x timed out\n", f7_msg->addr);
 		if (i2c_dev->use_dma)
 			dmaengine_terminate_sync(dma->chan_using);
@@ -1986,23 +2019,27 @@ static int stm32f7_i2c_unreg_slave(struct i2c_client *slave)
 static int stm32f7_i2c_write_fm_plus_bits(struct stm32f7_i2c_dev *i2c_dev,
 					  bool enable)
 {
-	int ret;
+	int ret = 0;
 
 	if (i2c_dev->bus_rate <= I2C_MAX_FAST_MODE_FREQ ||
-	    IS_ERR_OR_NULL(i2c_dev->regmap))
+	    (!i2c_dev->setup.fmp_cr1_bit && IS_ERR_OR_NULL(i2c_dev->regmap)))
 		/* Optional */
 		return 0;
 
-	if (i2c_dev->fmp_sreg == i2c_dev->fmp_creg)
-		ret = regmap_update_bits(i2c_dev->regmap,
-					 i2c_dev->fmp_sreg,
-					 i2c_dev->fmp_mask,
-					 enable ? i2c_dev->fmp_mask : 0);
-	else
-		ret = regmap_write(i2c_dev->regmap,
-				   enable ? i2c_dev->fmp_sreg :
-					    i2c_dev->fmp_creg,
-				   i2c_dev->fmp_mask);
+	if (i2c_dev->setup.fmp_cr1_bit) {
+		if (enable)
+			stm32f7_i2c_set_bits(i2c_dev->base + STM32F7_I2C_CR1, STM32_I2C_CR1_FMP);
+		else
+			stm32f7_i2c_clr_bits(i2c_dev->base + STM32F7_I2C_CR1, STM32_I2C_CR1_FMP);
+	} else {
+		if (i2c_dev->fmp_sreg == i2c_dev->fmp_creg)
+			ret = regmap_update_bits(i2c_dev->regmap, i2c_dev->fmp_sreg,
+						 i2c_dev->fmp_mask, enable ? i2c_dev->fmp_mask : 0);
+		else
+			ret = regmap_write(i2c_dev->regmap,
+					   enable ? i2c_dev->fmp_sreg : i2c_dev->fmp_creg,
+					   i2c_dev->fmp_mask);
+	}
 
 	return ret;
 }
@@ -2136,6 +2173,13 @@ static int stm32f7_i2c_probe(struct platform_device *pdev)
 	if (!i2c_dev)
 		return -ENOMEM;
 
+	setup = of_device_get_match_data(&pdev->dev);
+	if (!setup) {
+		dev_err(&pdev->dev, "Can't get device data\n");
+		return -ENODEV;
+	}
+	i2c_dev->setup = *setup;
+
 	i2c_dev->base = devm_platform_get_and_ioremap_resource(pdev, 0, &res);
 	if (IS_ERR(i2c_dev->base))
 		return PTR_ERR(i2c_dev->base);
@@ -2144,10 +2188,6 @@ static int stm32f7_i2c_probe(struct platform_device *pdev)
 	irq_event = platform_get_irq(pdev, 0);
 	if (irq_event < 0)
 		return irq_event;
-
-	irq_error = platform_get_irq(pdev, 1);
-	if (irq_error < 0)
-		return irq_error;
 
 	i2c_dev->wakeup_src = of_property_read_bool(pdev->dev.of_node,
 						    "wakeup-source");
@@ -2176,20 +2216,19 @@ static int stm32f7_i2c_probe(struct platform_device *pdev)
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "Failed to request irq event\n");
 
-	ret = devm_request_threaded_irq(&pdev->dev, irq_error,
-					NULL,
-					stm32f7_i2c_isr_error_thread,
-					IRQF_ONESHOT,
-					pdev->name, i2c_dev);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret, "Failed to request irq error\n");
+	if (!i2c_dev->setup.single_it_line) {
+		irq_error = platform_get_irq(pdev, 1);
+		if (irq_error < 0)
+			return irq_error;
 
-	setup = of_device_get_match_data(&pdev->dev);
-	if (!setup) {
-		dev_err(&pdev->dev, "Can't get device data\n");
-		return -ENODEV;
+		ret = devm_request_threaded_irq(&pdev->dev, irq_error,
+						NULL,
+						stm32f7_i2c_isr_error_thread,
+						IRQF_ONESHOT,
+						pdev->name, i2c_dev);
+		if (ret)
+			return dev_err_probe(&pdev->dev, ret, "Failed to request irq error\n");
 	}
-	i2c_dev->setup = *setup;
 
 	ret = stm32f7_i2c_setup_timing(i2c_dev, &i2c_dev->setup);
 	if (ret)
@@ -2197,9 +2236,12 @@ static int stm32f7_i2c_probe(struct platform_device *pdev)
 
 	/* Setup Fast mode plus if necessary */
 	if (i2c_dev->bus_rate > I2C_MAX_FAST_MODE_FREQ) {
-		ret = stm32f7_i2c_setup_fm_plus_bits(pdev, i2c_dev);
-		if (ret)
-			return ret;
+		if (!i2c_dev->setup.fmp_cr1_bit) {
+			ret = stm32f7_i2c_setup_fm_plus_bits(pdev, i2c_dev);
+			if (ret)
+				return ret;
+		}
+
 		ret = stm32f7_i2c_write_fm_plus_bits(i2c_dev, true);
 		if (ret)
 			return ret;
@@ -2478,6 +2520,7 @@ static const struct of_device_id stm32f7_i2c_match[] = {
 	{ .compatible = "st,stm32f7-i2c", .data = &stm32f7_setup},
 	{ .compatible = "st,stm32mp15-i2c", .data = &stm32mp15_setup},
 	{ .compatible = "st,stm32mp13-i2c", .data = &stm32mp13_setup},
+	{ .compatible = "st,stm32mp25-i2c", .data = &stm32mp25_setup},
 	{},
 };
 MODULE_DEVICE_TABLE(of, stm32f7_i2c_match);
@@ -2489,7 +2532,7 @@ static struct platform_driver stm32f7_i2c_driver = {
 		.pm = &stm32f7_i2c_pm_ops,
 	},
 	.probe = stm32f7_i2c_probe,
-	.remove_new = stm32f7_i2c_remove,
+	.remove = stm32f7_i2c_remove,
 };
 
 module_platform_driver(stm32f7_i2c_driver);

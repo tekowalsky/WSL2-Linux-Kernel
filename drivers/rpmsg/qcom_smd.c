@@ -746,7 +746,7 @@ static int __qcom_smd_send(struct qcom_smd_channel *channel, const void *data,
 	__le32 hdr[5] = { cpu_to_le32(len), };
 	int tlen = sizeof(hdr) + len;
 	unsigned long flags;
-	int ret = 0;
+	int ret;
 
 	/* Word aligned channels only accept word size aligned data */
 	if (channel->info_word && len % 4)
@@ -1596,7 +1596,7 @@ MODULE_DEVICE_TABLE(of, qcom_smd_of_match);
 
 static struct platform_driver qcom_smd_driver = {
 	.probe = qcom_smd_probe,
-	.remove_new = qcom_smd_remove,
+	.remove = qcom_smd_remove,
 	.driver = {
 		.name = "qcom-smd",
 		.of_match_table = qcom_smd_of_match,

@@ -1506,8 +1506,8 @@ static bool install_gpe_event_handler(struct acpi_ec *ec)
 
 static bool install_gpio_irq_event_handler(struct acpi_ec *ec)
 {
-	return request_irq(ec->irq, acpi_ec_irq_handler, IRQF_SHARED,
-			   "ACPI EC", ec) >= 0;
+	return request_threaded_irq(ec->irq, NULL, acpi_ec_irq_handler,
+				    IRQF_SHARED | IRQF_ONESHOT, "ACPI EC", ec) >= 0;
 }
 
 /**
@@ -1677,8 +1677,8 @@ static int acpi_ec_add(struct acpi_device *device)
 	struct acpi_ec *ec;
 	int ret;
 
-	strcpy(acpi_device_name(device), ACPI_EC_DEVICE_NAME);
-	strcpy(acpi_device_class(device), ACPI_EC_CLASS);
+	strscpy(acpi_device_name(device), ACPI_EC_DEVICE_NAME);
+	strscpy(acpi_device_class(device), ACPI_EC_CLASS);
 
 	if (boot_ec && (boot_ec->handle == device->handle ||
 	    !strcmp(acpi_device_hid(device), ACPI_ECDT_HID))) {
@@ -2299,40 +2299,6 @@ static const struct dmi_system_id acpi_ec_no_wakeup[] = {
 		.matches = {
 			DMI_MATCH(DMI_SYS_VENDOR, "HP"),
 			DMI_MATCH(DMI_PRODUCT_FAMILY, "103C_5336AN HP ZHAN 66 Pro"),
-		},
-	},
-	/*
-	 * Lenovo Legion Go S; touchscreen blocks HW sleep when woken up from EC
-	 * https://gitlab.freedesktop.org/drm/amd/-/issues/3929
-	 */
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "83L3"),
-		}
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "83N6"),
-		}
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "83Q2"),
-		}
-	},
-	{
-		.matches = {
-			DMI_MATCH(DMI_BOARD_VENDOR, "LENOVO"),
-			DMI_MATCH(DMI_PRODUCT_NAME, "83Q3"),
-		}
-	},
-	{
-		// TUXEDO InfinityBook Pro AMD Gen9
-		.matches = {
-			DMI_MATCH(DMI_BOARD_NAME, "GXxHRXx"),
 		},
 	},
 	{ },

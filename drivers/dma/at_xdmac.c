@@ -2433,7 +2433,7 @@ err_free_irq:
 	return ret;
 }
 
-static int at_xdmac_remove(struct platform_device *pdev)
+static void at_xdmac_remove(struct platform_device *pdev)
 {
 	struct at_xdmac	*atxdmac = (struct at_xdmac *)platform_get_drvdata(pdev);
 	int		i;
@@ -2454,8 +2454,6 @@ static int at_xdmac_remove(struct platform_device *pdev)
 		tasklet_kill(&atchan->tasklet);
 		at_xdmac_free_chan_resources(&atchan->chan);
 	}
-
-	return 0;
 }
 
 static const struct dev_pm_ops __maybe_unused atmel_xdmac_dev_pm_ops = {

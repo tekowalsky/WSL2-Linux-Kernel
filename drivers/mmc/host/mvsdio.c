@@ -22,7 +22,7 @@
 #include <linux/mmc/slot-gpio.h>
 
 #include <linux/sizes.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 #include "mvsdio.h"
 
@@ -292,7 +292,7 @@ static u32 mvsd_finish_data(struct mvsd_host *host, struct mmc_data *data,
 		host->pio_ptr = NULL;
 		host->pio_size = 0;
 	} else {
-		dma_unmap_sg(mmc_dev(host->mmc), data->sg, data->sg_len,
+		dma_unmap_sg(mmc_dev(host->mmc), data->sg, host->sg_frags,
 			     mmc_get_dma_dir(data));
 	}
 
@@ -819,7 +819,7 @@ MODULE_DEVICE_TABLE(of, mvsdio_dt_ids);
 
 static struct platform_driver mvsd_driver = {
 	.probe		= mvsd_probe,
-	.remove_new	= mvsd_remove,
+	.remove		= mvsd_remove,
 	.driver		= {
 		.name	= DRIVER_NAME,
 		.probe_type = PROBE_PREFER_ASYNCHRONOUS,

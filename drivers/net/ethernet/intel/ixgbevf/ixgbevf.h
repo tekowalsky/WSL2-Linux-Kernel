@@ -366,13 +366,6 @@ struct ixgbevf_adapter {
 	/* Interrupt Throttle Rate */
 	u32 eitr_param;
 
-	u32 pf_features;
-#define IXGBEVF_PF_SUP_IPSEC		BIT(0)
-#define IXGBEVF_PF_SUP_ESX_MBX		BIT(1)
-
-#define IXGBEVF_SUPPORTED_FEATURES	(IXGBEVF_PF_SUP_IPSEC | \
-					IXGBEVF_PF_SUP_ESX_MBX)
-
 	struct ixgbevf_hw_stats stats;
 
 	unsigned long state;
@@ -450,7 +443,6 @@ extern const struct ixgbevf_info ixgbevf_X540_vf_hv_info;
 extern const struct ixgbevf_info ixgbevf_X550_vf_hv_info;
 extern const struct ixgbevf_info ixgbevf_X550EM_x_vf_hv_info;
 extern const struct ixgbevf_info ixgbevf_e610_vf_hv_info;
-extern const struct ixgbe_mbx_operations ixgbevf_hv_mbx_ops;
 
 /* needed by ethtool.c */
 extern const char ixgbevf_driver_name[];

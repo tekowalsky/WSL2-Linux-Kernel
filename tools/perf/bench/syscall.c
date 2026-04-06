@@ -22,7 +22,8 @@
 #define __NR_fork -1
 #endif
 
-static	int loops;
+#define LOOPS_DEFAULT 10000000
+static	int loops = LOOPS_DEFAULT;
 
 static const struct option options[] = {
 	OPT_INTEGER('l', "loop",	&loops,		"Specify number of loops"),
@@ -79,18 +80,6 @@ static int bench_syscall_common(int argc, const char **argv, int syscall)
 	const char *name = NULL;
 	int i;
 
-	switch (syscall) {
-	case __NR_fork:
-	case __NR_execve:
-		/* Limit default loop to 10000 times to save time */
-		loops = 10000;
-		break;
-	default:
-		loops = 10000000;
-		break;
-	}
-
-	/* Options -l and --loops override default above */
 	argc = parse_options(argc, argv, options, bench_syscall_usage, 0);
 
 	gettimeofday(&start, NULL);
@@ -105,9 +94,16 @@ static int bench_syscall_common(int argc, const char **argv, int syscall)
 			break;
 		case __NR_fork:
 			test_fork();
+			/* Only loop 10000 times to save time */
+			if (i == 10000)
+				loops = 10000;
 			break;
 		case __NR_execve:
 			test_execve();
+			/* Only loop 10000 times to save time */
+			if (i == 10000)
+				loops = 10000;
+			break;
 		default:
 			break;
 		}

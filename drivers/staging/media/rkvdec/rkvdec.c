@@ -213,14 +213,8 @@ static int rkvdec_enum_framesizes(struct file *file, void *priv,
 	if (!fmt)
 		return -EINVAL;
 
-	fsize->type = V4L2_FRMSIZE_TYPE_CONTINUOUS;
-	fsize->stepwise.min_width = 1;
-	fsize->stepwise.max_width = fmt->frmsize.max_width;
-	fsize->stepwise.step_width = 1;
-	fsize->stepwise.min_height = 1;
-	fsize->stepwise.max_height = fmt->frmsize.max_height;
-	fsize->stepwise.step_height = 1;
-
+	fsize->type = V4L2_FRMSIZE_TYPE_STEPWISE;
+	fsize->stepwise = fmt->frmsize;
 	return 0;
 }
 
@@ -623,8 +617,6 @@ static const struct vb2_ops rkvdec_queue_ops = {
 	.buf_request_complete = rkvdec_buf_request_complete,
 	.start_streaming = rkvdec_start_streaming,
 	.stop_streaming = rkvdec_stop_streaming,
-	.wait_prepare = vb2_ops_wait_prepare,
-	.wait_finish = vb2_ops_wait_finish,
 };
 
 static int rkvdec_request_validate(struct media_request *req)
@@ -1109,7 +1101,7 @@ static const struct dev_pm_ops rkvdec_pm_ops = {
 
 static struct platform_driver rkvdec_driver = {
 	.probe = rkvdec_probe,
-	.remove_new = rkvdec_remove,
+	.remove = rkvdec_remove,
 	.driver = {
 		   .name = "rkvdec",
 		   .of_match_table = of_rkvdec_match,

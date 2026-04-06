@@ -222,13 +222,6 @@ static inline unsigned long dst_metric_rtt(const struct dst_entry *dst, int metr
 	return msecs_to_jiffies(dst_metric(dst, metric));
 }
 
-static inline u32
-dst_allfrag(const struct dst_entry *dst)
-{
-	int ret = dst_feature(dst,  RTAX_FEATURE_ALLFRAG);
-	return ret;
-}
-
 static inline int
 dst_metric_locked(const struct dst_entry *dst, int metric)
 {
@@ -314,7 +307,7 @@ static inline bool dst_hold_safe(struct dst_entry *dst)
  * @skb: buffer
  *
  * If dst is not yet refcounted and not destroyed, grab a ref on it.
- * Returns true if dst is refcounted.
+ * Returns: true if dst is refcounted.
  */
 static inline bool skb_dst_force(struct sk_buff *skb)
 {
@@ -348,7 +341,7 @@ static inline void __skb_tunnel_rx(struct sk_buff *skb, struct net_device *dev,
 	skb->dev = dev;
 
 	/*
-	 * Clear hash so that we can recalulate the hash for the
+	 * Clear hash so that we can recalculate the hash for the
 	 * encapsulated packet, unless we have already determine the hash
 	 * over the L4 4-tuple.
 	 */
@@ -392,12 +385,11 @@ static inline int dst_discard(struct sk_buff *skb)
 {
 	return dst_discard_out(&init_net, skb->sk, skb);
 }
-void *dst_alloc(struct dst_ops *ops, struct net_device *dev, int initial_ref,
+void *dst_alloc(struct dst_ops *ops, struct net_device *dev,
 		int initial_obsolete, unsigned short flags);
 void dst_init(struct dst_entry *dst, struct dst_ops *ops,
-	      struct net_device *dev, int initial_ref, int initial_obsolete,
+	      struct net_device *dev, int initial_obsolete,
 	      unsigned short flags);
-struct dst_entry *dst_destroy(struct dst_entry *dst);
 void dst_dev_put(struct dst_entry *dst);
 
 static inline void dst_confirm(struct dst_entry *dst)
@@ -464,7 +456,7 @@ INDIRECT_CALLABLE_DECLARE(int ip_output(struct net *, struct sock *,
 /* Output packet to network from transport.  */
 static inline int dst_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
-	return INDIRECT_CALL_INET(READ_ONCE(skb_dst(skb)->output),
+	return INDIRECT_CALL_INET(skb_dst(skb)->output,
 				  ip6_output, ip_output,
 				  net, sk, skb);
 }
@@ -474,7 +466,7 @@ INDIRECT_CALLABLE_DECLARE(int ip_local_deliver(struct sk_buff *));
 /* Input packet from network to transport.  */
 static inline int dst_input(struct sk_buff *skb)
 {
-	return INDIRECT_CALL_INET(READ_ONCE(skb_dst(skb)->input),
+	return INDIRECT_CALL_INET(skb_dst(skb)->input,
 				  ip6_input, ip_local_deliver, skb);
 }
 
@@ -567,18 +559,6 @@ static inline void skb_dst_update_pmtu_no_confirm(struct sk_buff *skb, u32 mtu)
 
 	if (dst && dst->ops->update_pmtu)
 		dst->ops->update_pmtu(dst, NULL, skb, mtu, false);
-}
-
-static inline struct net_device *dst_dev_rcu(const struct dst_entry *dst)
-{
-	/* In the future, use rcu_dereference(dst->dev) */
-	WARN_ON_ONCE(!rcu_read_lock_held());
-	return READ_ONCE(dst->dev);
-}
-
-static inline struct net_device *skb_dst_dev_rcu(const struct sk_buff *skb)
-{
-	return dst_dev_rcu(skb_dst(skb));
 }
 
 struct dst_entry *dst_blackhole_check(struct dst_entry *dst, u32 cookie);

@@ -306,7 +306,7 @@ cleanup_pds:
 	return ret;
 }
 
-static int imx93_blk_ctrl_remove(struct platform_device *pdev)
+static void imx93_blk_ctrl_remove(struct platform_device *pdev)
 {
 	struct imx93_blk_ctrl *bc = dev_get_drvdata(&pdev->dev);
 	int i;
@@ -320,8 +320,6 @@ static int imx93_blk_ctrl_remove(struct platform_device *pdev)
 
 		pm_genpd_remove(&domain->genpd);
 	}
-
-	return 0;
 }
 
 static const struct imx93_blk_ctrl_domain_data imx93_media_blk_ctl_domain_data[] = {

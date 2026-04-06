@@ -185,8 +185,6 @@ static void tegra234_cbb_error_clear(struct tegra_cbb *cbb)
 {
 	struct tegra234_cbb *priv = to_tegra234_cbb(cbb);
 
-	writel(0, priv->mon + FABRIC_MN_MASTER_ERR_FORCE_0);
-
 	writel(0x3f, priv->mon + FABRIC_MN_MASTER_ERR_STATUS_0);
 	dsb(sy);
 }
@@ -279,7 +277,7 @@ static void tegra234_lookup_slave_timeout(struct seq_file *file, struct tegra234
 	 *    which timed out.
 	 *	a) Get block number from the index of set bit in
 	 *	   <FABRIC>_SN_AXI2APB_<>_BLOCK_TMO_STATUS_0 register.
-	 *	b) Get address of register repective to block number i.e.
+	 *	b) Get address of register respective to block number i.e.
 	 *	   <FABRIC>_SN_AXI2APB_<>_BLOCK<index-set-bit>_TMO_0.
 	 *	c) Read the register in above step to get client_id which
 	 *	   timed out as per the set bits.

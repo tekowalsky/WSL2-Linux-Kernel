@@ -13,6 +13,7 @@
 #include <linux/sched/signal.h>
 #include <linux/slab.h>
 #include <linux/sysfs.h>
+#include <linux/vmalloc.h>
 #include <asm/sgx.h>
 #include "driver.h"
 #include "encl.h"
@@ -629,7 +630,7 @@ static bool __init sgx_setup_epc_section(u64 phys_addr, u64 size,
 	if (!section->virt_addr)
 		return false;
 
-	section->pages = vmalloc(nr_pages * sizeof(struct sgx_epc_page));
+	section->pages = vmalloc_array(nr_pages, sizeof(struct sgx_epc_page));
 	if (!section->pages) {
 		memunmap(section->virt_addr);
 		return false;
@@ -718,8 +719,6 @@ int arch_memory_failure(unsigned long pfn, int flags)
 		goto out;
 	}
 
-	sgx_unmark_page_reclaimable(page);
-
 	/*
 	 * TBD: Add additional plumbing to enable pre-emptive
 	 * action for asynchronous poison notification. Until
@@ -734,7 +733,7 @@ out:
 	return 0;
 }
 
-/**
+/*
  * A section metric is concatenated in a way that @low bits 12-31 define the
  * bits 12-31 of the metric and @high bits 0-19 define the bits 32-51 of the
  * metric.
@@ -849,6 +848,13 @@ static bool __init sgx_page_cache_init(void)
 		return false;
 	}
 
+	for_each_online_node(nid) {
+		if (!node_isset(nid, sgx_numa_mask) &&
+		    node_state(nid, N_MEMORY) && node_state(nid, N_CPU))
+			pr_info("node%d has both CPUs and memory but doesn't have an EPC section\n",
+				nid);
+	}
+
 	return true;
 }
 
@@ -895,19 +901,15 @@ static struct miscdevice sgx_dev_provision = {
 int sgx_set_attribute(unsigned long *allowed_attributes,
 		      unsigned int attribute_fd)
 {
-	struct fd f = fdget(attribute_fd);
+	CLASS(fd, f)(attribute_fd);
 
-	if (!f.file)
+	if (fd_empty(f))
 		return -EINVAL;
 
-	if (f.file->f_op != &sgx_provision_fops) {
-		fdput(f);
+	if (fd_file(f)->f_op != &sgx_provision_fops)
 		return -EINVAL;
-	}
 
 	*allowed_attributes |= SGX_ATTR_PROVISIONKEY;
-
-	fdput(f);
 	return 0;
 }
 EXPORT_SYMBOL_GPL(sgx_set_attribute);

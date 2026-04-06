@@ -90,7 +90,7 @@ void cdns_pcie_set_outbound_region(struct cdns_pcie *pcie, u8 busnr, u8 fn,
 	cdns_pcie_writel(pcie, CDNS_PCIE_AT_OB_REGION_DESC1(r), desc1);
 
 	/* Set the CPU address */
-	if (pcie->ops && pcie->ops->cpu_addr_fixup)
+	if (pcie->ops->cpu_addr_fixup)
 		cpu_addr = pcie->ops->cpu_addr_fixup(pcie, cpu_addr);
 
 	addr0 = CDNS_PCIE_AT_OB_REGION_CPU_ADDR0_NBITS(nbits) |
@@ -120,7 +120,7 @@ void cdns_pcie_set_outbound_region_for_normal_msg(struct cdns_pcie *pcie,
 	}
 
 	/* Set the CPU address */
-	if (pcie->ops && pcie->ops->cpu_addr_fixup)
+	if (pcie->ops->cpu_addr_fixup)
 		cpu_addr = pcie->ops->cpu_addr_fixup(pcie, cpu_addr);
 
 	addr0 = CDNS_PCIE_AT_OB_REGION_CPU_ADDR0_NBITS(17) |
@@ -197,7 +197,7 @@ int cdns_pcie_init_phy(struct device *dev, struct cdns_pcie *pcie)
 
 	phy_count = of_property_count_strings(np, "phy-names");
 	if (phy_count < 1) {
-		dev_err(dev, "no phy-names.  PHY will not be initialized\n");
+		dev_info(dev, "no \"phy-names\" property found; PHY will not be initialized\n");
 		pcie->phy_count = 0;
 		return 0;
 	}
@@ -260,7 +260,7 @@ static int cdns_pcie_resume_noirq(struct device *dev)
 
 	ret = cdns_pcie_enable_phy(pcie);
 	if (ret) {
-		dev_err(dev, "failed to enable phy\n");
+		dev_err(dev, "failed to enable PHY\n");
 		return ret;
 	}
 

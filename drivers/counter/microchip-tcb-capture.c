@@ -368,25 +368,6 @@ static int mchp_tc_probe(struct platform_device *pdev)
 			channel);
 	}
 
-	/* Disable Quadrature Decoder and position measure */
-	ret = regmap_update_bits(regmap, ATMEL_TC_BMR, ATMEL_TC_QDEN | ATMEL_TC_POSEN, 0);
-	if (ret)
-		return ret;
-
-	/* Setup the period capture mode */
-	ret = regmap_update_bits(regmap, ATMEL_TC_REG(priv->channel[0], CMR),
-				 ATMEL_TC_WAVE | ATMEL_TC_ABETRG | ATMEL_TC_CMR_MASK |
-				 ATMEL_TC_TCCLKS,
-				 ATMEL_TC_CMR_MASK);
-	if (ret)
-		return ret;
-
-	/* Enable clock and trigger counter */
-	ret = regmap_write(regmap, ATMEL_TC_REG(priv->channel[0], CCR),
-			   ATMEL_TC_CLKEN | ATMEL_TC_SWTRG);
-	if (ret)
-		return ret;
-
 	priv->tc_cfg = tcb_config;
 	priv->regmap = regmap;
 	counter->name = dev_name(&pdev->dev);
@@ -422,4 +403,4 @@ module_platform_driver(mchp_tc_driver);
 MODULE_AUTHOR("Kamel Bouhara <kamel.bouhara@bootlin.com>");
 MODULE_DESCRIPTION("Microchip TCB Capture driver");
 MODULE_LICENSE("GPL v2");
-MODULE_IMPORT_NS(COUNTER);
+MODULE_IMPORT_NS("COUNTER");

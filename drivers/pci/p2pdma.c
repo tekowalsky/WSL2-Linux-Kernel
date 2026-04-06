@@ -28,9 +28,9 @@ struct pci_p2pdma {
 };
 
 struct pci_p2pdma_pagemap {
-	struct dev_pagemap pgmap;
 	struct pci_dev *provider;
 	u64 bus_offset;
+	struct dev_pagemap pgmap;
 };
 
 static struct pci_p2pdma_pagemap *to_p2p_pgmap(struct dev_pagemap *pgmap)
@@ -90,7 +90,7 @@ static ssize_t published_show(struct device *dev, struct device_attribute *attr,
 static DEVICE_ATTR_RO(published);
 
 static int p2pmem_alloc_mmap(struct file *filp, struct kobject *kobj,
-		struct bin_attribute *attr, struct vm_area_struct *vma)
+		const struct bin_attribute *attr, struct vm_area_struct *vma)
 {
 	struct pci_dev *pdev = to_pci_dev(kobj_to_dev(kobj));
 	size_t len = vma->vm_end - vma->vm_start;
@@ -161,7 +161,7 @@ out:
 	return ret;
 }
 
-static struct bin_attribute p2pmem_alloc_attr = {
+static const struct bin_attribute p2pmem_alloc_attr = {
 	.attr = { .name = "allocate", .mode = 0660 },
 	.mmap = p2pmem_alloc_mmap,
 	/*
@@ -180,14 +180,14 @@ static struct attribute *p2pmem_attrs[] = {
 	NULL,
 };
 
-static struct bin_attribute *p2pmem_bin_attrs[] = {
+static const struct bin_attribute *const p2pmem_bin_attrs[] = {
 	&p2pmem_alloc_attr,
 	NULL,
 };
 
 static const struct attribute_group p2pmem_group = {
 	.attrs = p2pmem_attrs,
-	.bin_attrs = p2pmem_bin_attrs,
+	.bin_attrs_new = p2pmem_bin_attrs,
 	.name = "p2pmem",
 };
 
@@ -351,7 +351,7 @@ int pci_p2pdma_add_resource(struct pci_dev *pdev, int bar, size_t size,
 pages_free:
 	devm_memunmap_pages(&pdev->dev, pgmap);
 pgmap_free:
-	devm_kfree(&pdev->dev, p2p_pgmap);
+	devm_kfree(&pdev->dev, pgmap);
 	return error;
 }
 EXPORT_SYMBOL_GPL(pci_p2pdma_add_resource);
@@ -837,7 +837,6 @@ void *pci_alloc_p2pmem(struct pci_dev *pdev, size_t size)
 	if (unlikely(!percpu_ref_tryget_live_rcu(ref))) {
 		gen_pool_free(p2pdma->pool, (unsigned long) ret, size);
 		ret = NULL;
-		goto out;
 	}
 out:
 	rcu_read_unlock();

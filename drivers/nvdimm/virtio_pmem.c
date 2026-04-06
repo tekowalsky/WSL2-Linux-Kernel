@@ -29,15 +29,28 @@ static int init_vq(struct virtio_pmem *vpmem)
 	return 0;
 };
 
+static int virtio_pmem_validate(struct virtio_device *vdev)
+{
+	struct virtio_shm_region shm_reg;
+
+	if (virtio_has_feature(vdev, VIRTIO_PMEM_F_SHMEM_REGION) &&
+		!virtio_get_shm_region(vdev, &shm_reg, (u8)VIRTIO_PMEM_SHMEM_REGION_ID)
+	) {
+		dev_notice(&vdev->dev, "failed to get shared memory region %d\n",
+				VIRTIO_PMEM_SHMEM_REGION_ID);
+		__virtio_clear_bit(vdev, VIRTIO_PMEM_F_SHMEM_REGION);
+	}
+	return 0;
+}
+
 static int virtio_pmem_probe(struct virtio_device *vdev)
 {
 	struct nd_region_desc ndr_desc = {};
 	struct nd_region *nd_region;
 	struct virtio_pmem *vpmem;
 	struct resource res;
+	struct virtio_shm_region shm_reg;
 	int err = 0;
-	bool have_shm_region;
-	struct virtio_shm_region pmem_region;
 
 	if (!vdev->config->get) {
 		dev_err(&vdev->dev, "%s failure: config access disabled\n",
@@ -59,14 +72,10 @@ static int virtio_pmem_probe(struct virtio_device *vdev)
 		goto out_err;
 	}
 
-	/* Retrieve the pmem device's address and size. It may have been supplied
-	 * as a PCI BAR-relative shared memory region, or as a guest absolute address.
-	 */
-	have_shm_region = virtio_get_shm_region(vpmem->vdev, &pmem_region,
-						VIRTIO_PMEM_SHMCAP_ID_PMEM_REGION);
-	if (have_shm_region) {
-		vpmem->start = pmem_region.addr;
-		vpmem->size = pmem_region.len;
+	if (virtio_has_feature(vdev, VIRTIO_PMEM_F_SHMEM_REGION)) {
+		virtio_get_shm_region(vdev, &shm_reg, (u8)VIRTIO_PMEM_SHMEM_REGION_ID);
+		vpmem->start = shm_reg.addr;
+		vpmem->size = shm_reg.len;
 	} else {
 		virtio_cread_le(vpmem->vdev, struct virtio_pmem_config,
 				start, &vpmem->start);
@@ -134,12 +143,42 @@ static void virtio_pmem_remove(struct virtio_device *vdev)
 	virtio_reset_device(vdev);
 }
 
+static int virtio_pmem_freeze(struct virtio_device *vdev)
+{
+	vdev->config->del_vqs(vdev);
+	virtio_reset_device(vdev);
+
+	return 0;
+}
+
+static int virtio_pmem_restore(struct virtio_device *vdev)
+{
+	int ret;
+
+	ret = init_vq(vdev->priv);
+	if (ret) {
+		dev_err(&vdev->dev, "failed to initialize virtio pmem's vq\n");
+		return ret;
+	}
+	virtio_device_ready(vdev);
+
+	return 0;
+}
+
+static unsigned int features[] = {
+	VIRTIO_PMEM_F_SHMEM_REGION,
+};
+
 static struct virtio_driver virtio_pmem_driver = {
+	.feature_table		= features,
+	.feature_table_size	= ARRAY_SIZE(features),
 	.driver.name		= KBUILD_MODNAME,
-	.driver.owner		= THIS_MODULE,
 	.id_table		= id_table,
+	.validate		= virtio_pmem_validate,
 	.probe			= virtio_pmem_probe,
 	.remove			= virtio_pmem_remove,
+	.freeze			= virtio_pmem_freeze,
+	.restore		= virtio_pmem_restore,
 };
 
 module_virtio_driver(virtio_pmem_driver);

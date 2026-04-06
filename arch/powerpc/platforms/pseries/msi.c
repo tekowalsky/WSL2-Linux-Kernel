@@ -9,6 +9,7 @@
 #include <linux/irq.h>
 #include <linux/irqdomain.h>
 #include <linux/msi.h>
+#include <linux/seq_file.h>
 
 #include <asm/rtas.h>
 #include <asm/hw_irq.h>
@@ -26,6 +27,7 @@ static int query_token, change_token;
 #define RTAS_CHANGE_MSI_FN	3
 #define RTAS_CHANGE_MSIX_FN	4
 #define RTAS_CHANGE_32MSI_FN	5
+#define RTAS_CHANGE_32MSIX_FN	6
 
 /* RTAS Helpers */
 
@@ -41,7 +43,7 @@ static int rtas_change_msi(struct pci_dn *pdn, u32 func, u32 num_irqs)
 	seq_num = 1;
 	do {
 		if (func == RTAS_CHANGE_MSI_FN || func == RTAS_CHANGE_MSIX_FN ||
-		    func == RTAS_CHANGE_32MSI_FN)
+		    func == RTAS_CHANGE_32MSI_FN || func == RTAS_CHANGE_32MSIX_FN)
 			rc = rtas_call(change_token, 6, 4, rtas_ret, addr,
 					BUID_HI(buid), BUID_LO(buid),
 					func, num_irqs, seq_num);
@@ -406,8 +408,12 @@ again:
 
 		if (use_32bit_msi_hack && rc > 0)
 			rtas_hack_32bit_msi_gen2(pdev);
-	} else
-		rc = rtas_change_msi(pdn, RTAS_CHANGE_MSIX_FN, nvec);
+	} else {
+		if (pdev->no_64bit_msi)
+			rc = rtas_change_msi(pdn, RTAS_CHANGE_32MSIX_FN, nvec);
+		else
+			rc = rtas_change_msi(pdn, RTAS_CHANGE_MSIX_FN, nvec);
+	}
 
 	if (rc != nvec) {
 		if (nvec != nvec_in) {
@@ -519,12 +525,7 @@ static struct msi_domain_info pseries_msi_domain_info = {
 
 static void pseries_msi_compose_msg(struct irq_data *data, struct msi_msg *msg)
 {
-	struct pci_dev *dev = msi_desc_to_pci_dev(irq_data_get_msi_desc(data));
-
-	if (dev->current_state == PCI_D0)
-		__pci_read_msi_msg(irq_data_get_msi_desc(data), msg);
-	else
-		get_cached_msi_msg(data->irq, msg);
+	__pci_read_msi_msg(irq_data_get_msi_desc(data), msg);
 }
 
 static struct irq_chip pseries_msi_irq_chip = {
@@ -587,7 +588,7 @@ static int pseries_irq_domain_alloc(struct irq_domain *domain, unsigned int virq
 
 out:
 	/* TODO: handle RTAS cleanup in ->msi_finish() ? */
-	irq_domain_free_irqs_parent(domain, virq, i);
+	irq_domain_free_irqs_parent(domain, virq, i - 1);
 	return ret;
 }
 

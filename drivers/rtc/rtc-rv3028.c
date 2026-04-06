@@ -120,8 +120,9 @@ static ssize_t timestamp0_show(struct device *dev,
 {
 	struct rv3028_data *rv3028 = dev_get_drvdata(dev->parent);
 	struct rtc_time tm;
-	int ret, count;
+	unsigned int count;
 	u8 date[6];
+	int ret;
 
 	ret = regmap_read(rv3028->regmap, RV3028_TS_COUNT, &count);
 	if (ret)
@@ -156,7 +157,8 @@ static ssize_t timestamp0_count_show(struct device *dev,
 				     struct device_attribute *attr, char *buf)
 {
 	struct rv3028_data *rv3028 = dev_get_drvdata(dev->parent);
-	int ret, count;
+	unsigned int count;
+	int ret;
 
 	ret = regmap_read(rv3028->regmap, RV3028_TS_COUNT, &count);
 	if (ret)
@@ -738,7 +740,7 @@ static long rv3028_clkout_round_rate(struct clk_hw *hw, unsigned long rate,
 		if (clkout_rates[i] <= rate)
 			return clkout_rates[i];
 
-	return clkout_rates[0];
+	return 0;
 }
 
 static int rv3028_clkout_set_rate(struct clk_hw *hw, unsigned long rate,

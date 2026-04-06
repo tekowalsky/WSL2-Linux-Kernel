@@ -152,7 +152,6 @@ struct smk_net4addr {
 	struct smack_known	*smk_label;	/* label */
 };
 
-#if IS_ENABLED(CONFIG_IPV6)
 /*
  * An entry in the table identifying IPv6 hosts.
  */
@@ -163,9 +162,7 @@ struct smk_net6addr {
 	int			smk_masks;	/* mask size */
 	struct smack_known	*smk_label;	/* label */
 };
-#endif /* CONFIG_IPV6 */
 
-#ifdef SMACK_IPV6_PORT_LABELING
 /*
  * An entry in the table identifying ports.
  */
@@ -178,7 +175,6 @@ struct smk_port_label {
 	short			smk_sock_type;	/* Socket type */
 	short			smk_can_reuse;
 };
-#endif /* SMACK_IPV6_PORT_LABELING */
 
 struct smack_known_list_elem {
 	struct list_head	list;
@@ -284,6 +280,7 @@ int smk_access(struct smack_known *, struct smack_known *,
 int smk_tskacc(struct task_smack *, struct smack_known *,
 	       u32, struct smk_audit_info *);
 int smk_curacc(struct smack_known *, u32, struct smk_audit_info *);
+int smack_str_from_perm(char *string, int access);
 struct smack_known *smack_from_secid(const u32);
 char *smk_parse_smack(const char *string, int len);
 int smk_netlbl_mls(int, char *, struct netlbl_lsm_secattr *, int);
@@ -318,9 +315,7 @@ extern struct smack_known smack_known_web;
 extern struct mutex	smack_known_lock;
 extern struct list_head smack_known_list;
 extern struct list_head smk_net4addr_list;
-#if IS_ENABLED(CONFIG_IPV6)
 extern struct list_head smk_net6addr_list;
-#endif /* CONFIG_IPV6 */
 
 extern struct mutex     smack_onlycap_lock;
 extern struct list_head smack_onlycap_list;
@@ -360,6 +355,18 @@ static inline struct superblock_smack *smack_superblock(
 {
 	return superblock->s_security + smack_blob_sizes.lbs_superblock;
 }
+
+static inline struct socket_smack *smack_sock(const struct sock *sock)
+{
+	return sock->sk_security + smack_blob_sizes.lbs_sock;
+}
+
+#ifdef CONFIG_KEYS
+static inline struct smack_known **smack_key(const struct key *key)
+{
+	return key->security + smack_blob_sizes.lbs_key;
+}
+#endif /* CONFIG_KEYS */
 
 /*
  * Is the directory transmuting?

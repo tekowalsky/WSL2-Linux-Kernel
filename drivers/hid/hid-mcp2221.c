@@ -814,10 +814,6 @@ static int mcp2221_raw_event(struct hid_device *hdev,
 			}
 			if (data[2] == MCP2221_I2C_READ_COMPL ||
 			    data[2] == MCP2221_I2C_READ_PARTIAL) {
-				if (!mcp->rxbuf || mcp->rxbuf_idx < 0 || data[3] > 60) {
-					mcp->status = -EINVAL;
-					break;
-				}
 				buf = mcp->rxbuf;
 				memcpy(&buf[mcp->rxbuf_idx], &data[4], data[3]);
 				mcp->rxbuf_idx = mcp->rxbuf_idx + data[3];
@@ -1052,7 +1048,7 @@ static int mcp_iio_channels(struct mcp2221 *mcp)
 			break;
 		default:
 			continue;
-		};
+		}
 
 		chan->type = IIO_VOLTAGE;
 		chan->indexed = 1;
@@ -1189,6 +1185,7 @@ static int mcp2221_probe(struct hid_device *hdev,
 	mcp->adapter.algo = &mcp_i2c_algo;
 	mcp->adapter.retries = 1;
 	mcp->adapter.dev.parent = &hdev->dev;
+	ACPI_COMPANION_SET(&mcp->adapter.dev, ACPI_COMPANION(hdev->dev.parent));
 	snprintf(mcp->adapter.name, sizeof(mcp->adapter.name),
 			"MCP2221 usb-i2c bridge");
 

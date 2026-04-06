@@ -672,8 +672,8 @@ static const struct scsi_host_template mv6_sht = {
 	.dma_boundary		= MV_DMA_BOUNDARY,
 	.sdev_groups		= ata_ncq_sdev_groups,
 	.change_queue_depth	= ata_scsi_change_queue_depth,
-	.tag_alloc_policy	= BLK_TAG_ALLOC_RR,
-	.slave_configure	= ata_scsi_slave_config
+	.tag_alloc_policy_rr	= true,
+	.sdev_configure		= ata_scsi_sdev_configure
 };
 
 static struct ata_port_operations mv5_ops = {
@@ -4092,10 +4092,13 @@ static int mv_platform_probe(struct platform_device *pdev)
 	hpriv->base -= SATAHC0_REG_BASE;
 
 	hpriv->clk = clk_get(&pdev->dev, NULL);
-	if (IS_ERR(hpriv->clk))
+	if (IS_ERR(hpriv->clk)) {
 		dev_notice(&pdev->dev, "cannot get optional clkdev\n");
-	else
-		clk_prepare_enable(hpriv->clk);
+	} else {
+		rc = clk_prepare_enable(hpriv->clk);
+		if (rc)
+			goto err;
+	}
 
 	for (port = 0; port < n_ports; port++) {
 		char port_number[16];
@@ -4252,7 +4255,7 @@ MODULE_DEVICE_TABLE(of, mv_sata_dt_ids);
 
 static struct platform_driver mv_platform_driver = {
 	.probe		= mv_platform_probe,
-	.remove_new	= mv_platform_remove,
+	.remove		= mv_platform_remove,
 	.suspend	= mv_platform_suspend,
 	.resume		= mv_platform_resume,
 	.driver		= {

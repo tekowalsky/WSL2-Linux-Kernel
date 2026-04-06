@@ -453,7 +453,8 @@ out:
 
 /* Sync changes in local quota file into global quota file and
  * reinitialize local quota file.
- * The function expects local quota file to be already locked. */
+ * The function expects local quota file to be already locked and
+ * s_umount locked in shared mode. */
 static int ocfs2_recover_local_quota_file(struct inode *lqinode,
 					  int type,
 					  struct ocfs2_quota_recovery *rec)
@@ -469,6 +470,7 @@ static int ocfs2_recover_local_quota_file(struct inode *lqinode,
 	int bit, chunk;
 	struct ocfs2_recovery_chunk *rchunk, *next;
 	qsize_t spacechange, inodechange;
+	unsigned int memalloc;
 
 	trace_ocfs2_recover_local_quota_file((unsigned long)lqinode->i_ino, type);
 
@@ -520,6 +522,7 @@ static int ocfs2_recover_local_quota_file(struct inode *lqinode,
 				goto out_drop_lock;
 			}
 			down_write(&sb_dqopt(sb)->dqio_sem);
+			memalloc = memalloc_nofs_save();
 			spin_lock(&dquot->dq_dqb_lock);
 			/* Add usage from quota entry into quota changes
 			 * of our node. Auxiliary variables are important
@@ -552,6 +555,7 @@ static int ocfs2_recover_local_quota_file(struct inode *lqinode,
 			unlock_buffer(qbh);
 			ocfs2_journal_dirty(handle, qbh);
 out_commit:
+			memalloc_nofs_restore(memalloc);
 			up_write(&sb_dqopt(sb)->dqio_sem);
 			ocfs2_commit_trans(OCFS2_SB(sb), handle);
 out_drop_lock:
@@ -584,6 +588,7 @@ int ocfs2_finish_quota_recovery(struct ocfs2_super *osb,
 {
 	unsigned int ino[OCFS2_MAXQUOTAS] = { LOCAL_USER_QUOTA_SYSTEM_INODE,
 					      LOCAL_GROUP_QUOTA_SYSTEM_INODE };
+	struct super_block *sb = osb->sb;
 	struct ocfs2_local_disk_dqinfo *ldinfo;
 	struct buffer_head *bh;
 	handle_t *handle;
@@ -595,6 +600,7 @@ int ocfs2_finish_quota_recovery(struct ocfs2_super *osb,
 	printk(KERN_NOTICE "ocfs2: Finishing quota recovery on device (%s) for "
 	       "slot %u\n", osb->dev_str, slot_num);
 
+	down_read(&sb->s_umount);
 	for (type = 0; type < OCFS2_MAXQUOTAS; type++) {
 		if (list_empty(&(rec->r_list[type])))
 			continue;
@@ -671,7 +677,8 @@ out_put:
 			break;
 	}
 out:
-	ocfs2_free_quota_recovery(rec);
+	up_read(&sb->s_umount);
+	kfree(rec);
 	return status;
 }
 
@@ -836,7 +843,8 @@ static int ocfs2_local_free_info(struct super_block *sb, int type)
 	ocfs2_release_local_quota_bitmaps(&oinfo->dqi_chunk);
 
 	/*
-	 * ocfs2_dismount_volume() has already aborted quota recovery...
+	 * s_umount held in exclusive mode protects us against racing with
+	 * recovery thread...
 	 */
 	if (oinfo->dqi_rec) {
 		ocfs2_free_quota_recovery(oinfo->dqi_rec);
@@ -1240,6 +1248,10 @@ int ocfs2_create_local_dquot(struct dquot *dquot)
 				     &od->dq_local_phys_blk,
 				     &pcount,
 				     NULL);
+	if (status < 0) {
+		mlog_errno(status);
+		goto out;
+	}
 
 	/* Initialize dquot structure on disk */
 	status = ocfs2_local_write_dquot(dquot);

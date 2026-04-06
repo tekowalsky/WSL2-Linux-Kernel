@@ -350,6 +350,9 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 #ifdef CONFIG_CIFS_SWN_UPCALL
 	seq_puts(m, ",WITNESS");
 #endif
+#ifdef CONFIG_CIFS_COMPRESSION
+	seq_puts(m, ",COMPRESSION");
+#endif
 	seq_putc(m, '\n');
 	seq_printf(m, "CIFSMaxBufSize: %d\n", CIFSMaxBufSize);
 	seq_printf(m, "Active VFS Requests: %d\n", GlobalTotalActiveXid);
@@ -384,7 +387,7 @@ static int cifs_debug_data_proc_show(struct seq_file *m, void *v)
 		seq_printf(m, "\nSMBDirect (in hex) protocol version: %x "
 			"transport status: %x",
 			server->smbd_conn->protocol,
-			server->smbd_conn->socket.status);
+			server->smbd_conn->transport_status);
 		seq_printf(m, "\nConn receive_credit_max: %x "
 			"send_credit_target: %x max_send_size: %x",
 			server->smbd_conn->receive_credit_max,
@@ -475,7 +478,9 @@ skip_rdma:
 		}
 
 		seq_puts(m, "\nCompression: ");
-		if (!server->compression.requested)
+		if (!IS_ENABLED(CONFIG_CIFS_COMPRESSION))
+			seq_puts(m, "no built-in support");
+		else if (!server->compression.requested)
 			seq_puts(m, "disabled on mount");
 		else if (server->compression.enabled)
 			seq_printf(m, "enabled (%s)", compression_alg_str(server->compression.alg));

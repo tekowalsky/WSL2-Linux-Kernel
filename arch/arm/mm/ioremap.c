@@ -111,8 +111,8 @@ void __init add_static_vm_early(struct static_vm *svm)
 int ioremap_page(unsigned long virt, unsigned long phys,
 		 const struct mem_type *mtype)
 {
-	return ioremap_page_range(virt, virt + PAGE_SIZE, phys,
-				  __pgprot(mtype->prot_pte));
+	return vmap_page_range(virt, virt + PAGE_SIZE, phys,
+			       __pgprot(mtype->prot_pte));
 }
 EXPORT_SYMBOL(ioremap_page);
 
@@ -491,8 +491,8 @@ int pci_remap_iospace(const struct resource *res, phys_addr_t phys_addr)
 	if (res->end > IO_SPACE_LIMIT)
 		return -EINVAL;
 
-	return ioremap_page_range(vaddr, vaddr + resource_size(res), phys_addr,
-				  __pgprot(get_mem_type(pci_ioremap_mem_type)->prot_pte));
+	return vmap_page_range(vaddr, vaddr + resource_size(res), phys_addr,
+			       __pgprot(get_mem_type(pci_ioremap_mem_type)->prot_pte));
 }
 EXPORT_SYMBOL(pci_remap_iospace);
 
@@ -515,5 +515,7 @@ void __init early_ioremap_init(void)
 bool arch_memremap_can_ram_remap(resource_size_t offset, size_t size,
 				 unsigned long flags)
 {
-	return memblock_is_map_memory(offset);
+	unsigned long pfn = PHYS_PFN(offset);
+
+	return memblock_is_map_memory(pfn);
 }

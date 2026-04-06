@@ -70,7 +70,7 @@ static int bounce_error_event(struct snd_seq_client *client,
 			      int err, int atomic, int hop);
 static int snd_seq_deliver_single_event(struct snd_seq_client *client,
 					struct snd_seq_event *event,
-					int filter, int atomic, int hop);
+					int atomic, int hop);
 
 #if IS_ENABLED(CONFIG_SND_SEQ_UMP)
 static void free_ump_info(struct snd_seq_client *client);
@@ -539,10 +539,8 @@ static int check_port_perm(struct snd_seq_client_port *port, unsigned int flags)
 
 /*
  * check if the destination client is available, and return the pointer
- * if filter is non-zero, client filter bitmap is tested.
  */
-static struct snd_seq_client *get_event_dest_client(struct snd_seq_event *event,
-						    int filter)
+static struct snd_seq_client *get_event_dest_client(struct snd_seq_event *event)
 {
 	struct snd_seq_client *dest;
 
@@ -556,8 +554,6 @@ static struct snd_seq_client *get_event_dest_client(struct snd_seq_event *event,
 
 	if ((dest->filter & SNDRV_SEQ_FILTER_USE_EVENT) &&
 	    ! test_bit(event->type, dest->event_filter))
-		goto __not_avail;
-	if (filter && !(dest->filter & filter))
 		goto __not_avail;
 
 	return dest; /* ok - accessible */
@@ -602,7 +598,7 @@ static int bounce_error_event(struct snd_seq_client *client,
 	bounce_ev.data.quote.origin = event->dest;
 	bounce_ev.data.quote.event = event;
 	bounce_ev.data.quote.value = -err; /* use positive value */
-	result = snd_seq_deliver_single_event(NULL, &bounce_ev, 0, atomic, hop + 1);
+	result = snd_seq_deliver_single_event(NULL, &bounce_ev, atomic, hop + 1);
 	if (result < 0) {
 		client->event_lost++;
 		return result;
@@ -669,7 +665,7 @@ int __snd_seq_deliver_single_event(struct snd_seq_client *dest,
  */
 static int snd_seq_deliver_single_event(struct snd_seq_client *client,
 					struct snd_seq_event *event,
-					int filter, int atomic, int hop)
+					int atomic, int hop)
 {
 	struct snd_seq_client *dest = NULL;
 	struct snd_seq_client_port *dest_port = NULL;
@@ -678,7 +674,7 @@ static int snd_seq_deliver_single_event(struct snd_seq_client *client,
 
 	direct = snd_seq_ev_is_direct(event);
 
-	dest = get_event_dest_client(event, filter);
+	dest = get_event_dest_client(event);
 	if (dest == NULL)
 		goto __skip;
 	dest_port = snd_seq_port_use_ptr(dest, event->dest.port);
@@ -736,20 +732,14 @@ static int snd_seq_deliver_single_event(struct snd_seq_client *client,
  */
 static int __deliver_to_subscribers(struct snd_seq_client *client,
 				    struct snd_seq_event *event,
-				    int port, int atomic, int hop)
+				    struct snd_seq_client_port *src_port,
+				    int atomic, int hop)
 {
-	struct snd_seq_client_port *src_port;
 	struct snd_seq_subscribers *subs;
 	int err, result = 0, num_ev = 0;
 	union __snd_seq_event event_saved;
 	size_t saved_size;
 	struct snd_seq_port_subs_info *grp;
-
-	if (port < 0)
-		return 0;
-	src_port = snd_seq_port_use_ptr(client, port);
-	if (!src_port)
-		return 0;
 
 	/* save original event record */
 	saved_size = snd_seq_event_packet_size(event);
@@ -770,8 +760,7 @@ static int __deliver_to_subscribers(struct snd_seq_client *client,
 			/* convert time according to flag with subscription */
 			update_timestamp_of_queue(event, subs->info.queue,
 						  subs->info.flags & SNDRV_SEQ_PORT_SUBS_TIME_REAL);
-		err = snd_seq_deliver_single_event(client, event,
-						   0, atomic, hop);
+		err = snd_seq_deliver_single_event(client, event, atomic, hop);
 		if (err < 0) {
 			/* save first error that occurs and continue */
 			if (!result)
@@ -786,7 +775,6 @@ static int __deliver_to_subscribers(struct snd_seq_client *client,
 		read_unlock(&grp->list_lock);
 	else
 		up_read(&grp->list_mutex);
-	snd_seq_port_unlock(src_port);
 	memcpy(event, &event_saved, saved_size);
 	return (result < 0) ? result : num_ev;
 }
@@ -795,32 +783,25 @@ static int deliver_to_subscribers(struct snd_seq_client *client,
 				  struct snd_seq_event *event,
 				  int atomic, int hop)
 {
-	int ret;
-#if IS_ENABLED(CONFIG_SND_SEQ_UMP)
-	int ret2;
-#endif
+	struct snd_seq_client_port *src_port;
+	int ret = 0, ret2;
 
-	ret = __deliver_to_subscribers(client, event,
-				       event->source.port, atomic, hop);
-#if IS_ENABLED(CONFIG_SND_SEQ_UMP)
-	if (!snd_seq_client_is_ump(client) || client->ump_endpoint_port < 0)
+	src_port = snd_seq_port_use_ptr(client, event->source.port);
+	if (src_port) {
+		ret = __deliver_to_subscribers(client, event, src_port, atomic, hop);
+		snd_seq_port_unlock(src_port);
+	}
+
+	if (client->ump_endpoint_port < 0 ||
+	    event->source.port == client->ump_endpoint_port)
 		return ret;
-	/* If it's an event from EP port (and with a UMP group),
-	 * deliver to subscribers of the corresponding UMP group port, too.
-	 * Or, if it's from non-EP port, deliver to subscribers of EP port, too.
-	 */
-	if (event->source.port == client->ump_endpoint_port)
-		ret2 = __deliver_to_subscribers(client, event,
-						snd_seq_ump_group_port(event),
-						atomic, hop);
-	else
-		ret2 = __deliver_to_subscribers(client, event,
-						client->ump_endpoint_port,
-						atomic, hop);
-	if (ret2 < 0)
-		return ret2;
-#endif
-	return ret;
+
+	src_port = snd_seq_port_use_ptr(client, client->ump_endpoint_port);
+	if (!src_port)
+		return ret;
+	ret2 = __deliver_to_subscribers(client, event, src_port, atomic, hop);
+	snd_seq_port_unlock(src_port);
+	return ret2 < 0 ? ret2 : ret;
 }
 
 /* deliver an event to the destination port(s).
@@ -852,7 +833,7 @@ static int snd_seq_deliver_event(struct snd_seq_client *client, struct snd_seq_e
 	    event->dest.client == SNDRV_SEQ_ADDRESS_SUBSCRIBERS)
 		result = deliver_to_subscribers(client, event, atomic, hop);
 	else
-		result = snd_seq_deliver_single_event(client, event, 0, atomic, hop);
+		result = snd_seq_deliver_single_event(client, event, atomic, hop);
 
 	return result;
 }
@@ -1169,7 +1150,8 @@ static __poll_t snd_seq_poll(struct file *file, poll_table * wait)
 	if (snd_seq_file_flags(file) & SNDRV_SEQ_LFLG_OUTPUT) {
 
 		/* check if data is available in the pool */
-		if (snd_seq_pool_poll_wait(client->pool, file, wait))
+		if (!snd_seq_write_pool_allocated(client) ||
+		    snd_seq_pool_poll_wait(client->pool, file, wait))
 			mask |= EPOLLOUT | EPOLLWRNORM;
 	}
 
@@ -1334,6 +1316,10 @@ static int snd_seq_ioctl_set_client_info(struct snd_seq_client *client,
 		client->midi_version = client_info->midi_version;
 	memcpy(client->event_filter, client_info->event_filter, 32);
 	client->group_filter = client_info->group_filter;
+
+	/* notify the change */
+	snd_seq_system_client_ev_client_change(client->number);
+
 	return 0;
 }
 
@@ -1457,6 +1443,9 @@ static int snd_seq_ioctl_set_port_info(struct snd_seq_client *client, void *arg)
 	if (port) {
 		snd_seq_set_port_info(port, info);
 		snd_seq_port_unlock(port);
+		/* notify the change */
+		snd_seq_system_client_ev_port_change(info->addr.client,
+						     info->addr.port);
 	}
 	return 0;
 }
@@ -1513,7 +1502,7 @@ int snd_seq_client_notify_subscription(int client, int port,
 	event.data.connect.dest = info->dest;
 	event.data.connect.sender = info->sender;
 
-	return snd_seq_system_notify(client, port, &event);  /* non-atomic */
+	return snd_seq_system_notify(client, port, &event, false);  /* non-atomic */
 }
 
 
@@ -1760,6 +1749,8 @@ static int snd_seq_ioctl_get_queue_tempo(struct snd_seq_client *client,
 	tempo->ppq = tmr->ppq;
 	tempo->skew_value = tmr->skew;
 	tempo->skew_base = tmr->skew_base;
+	if (client->user_pversion >= SNDRV_PROTOCOL_VERSION(1, 0, 4))
+		tempo->tempo_base = tmr->tempo_base;
 	queuefree(queue);
 
 	return 0;
@@ -1781,6 +1772,8 @@ static int snd_seq_ioctl_set_queue_tempo(struct snd_seq_client *client,
 	struct snd_seq_queue_tempo *tempo = arg;
 	int result;
 
+	if (client->user_pversion < SNDRV_PROTOCOL_VERSION(1, 0, 4))
+		tempo->tempo_base = 0;
 	result = snd_seq_set_queue_tempo(client->number, tempo);
 	return result < 0 ? result : 0;
 }
@@ -2263,6 +2256,16 @@ static int snd_seq_ioctl_client_ump_info(struct snd_seq_client *caller,
  error:
 	mutex_unlock(&cptr->ioctl_mutex);
 	snd_seq_client_unlock(cptr);
+	if (!err && cmd == SNDRV_SEQ_IOCTL_SET_CLIENT_UMP_INFO) {
+		if (type == SNDRV_SEQ_CLIENT_UMP_INFO_ENDPOINT)
+			snd_seq_system_ump_notify(client, 0,
+						  SNDRV_SEQ_EVENT_UMP_EP_CHANGE,
+						  false);
+		else
+			snd_seq_system_ump_notify(client, type - 1,
+						  SNDRV_SEQ_EVENT_UMP_BLOCK_CHANGE,
+						  false);
+	}
 	return err;
 }
 #endif
@@ -2583,6 +2586,8 @@ int snd_seq_kernel_client_write_poll(int clientid, struct file *file, poll_table
 	if (client == NULL)
 		return -ENXIO;
 
+	if (! snd_seq_write_pool_allocated(client))
+		return 1;
 	if (snd_seq_pool_poll_wait(client->pool, file, wait))
 		return 1;
 	return 0;
@@ -2669,13 +2674,18 @@ static void snd_seq_info_dump_ports(struct snd_info_buffer *buffer,
 	list_for_each_entry(p, &client->ports_list_head, list) {
 		if (p->capability & SNDRV_SEQ_PORT_CAP_INACTIVE)
 			continue;
-		snd_iprintf(buffer, "  Port %3d : \"%s\" (%c%c%c%c) [%s]\n",
+		snd_iprintf(buffer, "  Port %3d : \"%s\" (%c%c%c%c) [%s]",
 			    p->addr.port, p->name,
 			    FLAG_PERM_RD(p->capability),
 			    FLAG_PERM_WR(p->capability),
 			    FLAG_PERM_EX(p->capability),
 			    FLAG_PERM_DUPLEX(p->capability),
 			    port_direction_name(p->direction));
+#if IS_ENABLED(CONFIG_SND_SEQ_UMP)
+		if (snd_seq_client_is_midi2(client) && p->is_midi1)
+			snd_iprintf(buffer, " [MIDI1]");
+#endif
+		snd_iprintf(buffer, "\n");
 		snd_seq_info_dump_subscribers(buffer, &p->c_src, 1, "    Connecting To: ");
 		snd_seq_info_dump_subscribers(buffer, &p->c_dest, 0, "    Connected From: ");
 	}
@@ -2755,7 +2765,6 @@ static const struct file_operations snd_seq_f_ops =
 	.write =	snd_seq_write,
 	.open =		snd_seq_open,
 	.release =	snd_seq_release,
-	.llseek =	no_llseek,
 	.poll =		snd_seq_poll,
 	.unlocked_ioctl =	snd_seq_ioctl,
 	.compat_ioctl =	snd_seq_ioctl_compat,
