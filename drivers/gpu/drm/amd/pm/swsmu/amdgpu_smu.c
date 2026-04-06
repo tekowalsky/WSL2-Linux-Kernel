@@ -608,6 +608,7 @@ static int smu_set_funcs(struct amdgpu_device *adev)
 		break;
 	case IP_VERSION(13, 0, 4):
 	case IP_VERSION(13, 0, 11):
+	case IP_VERSION(14, 0, 1):
 		smu_v13_0_4_set_ppt_funcs(smu);
 		break;
 	case IP_VERSION(13, 0, 5):
@@ -1581,6 +1582,7 @@ static int smu_disable_dpms(struct smu_context *smu)
 		switch (adev->ip_versions[MP1_HWIP][0]) {
 		case IP_VERSION(13, 0, 4):
 		case IP_VERSION(13, 0, 11):
+		case IP_VERSION(14, 0, 1):
 			return 0;
 		default:
 			break;
