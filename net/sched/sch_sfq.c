@@ -310,10 +310,7 @@ drop:
 		/* It is difficult to believe, but ALL THE SLOTS HAVE LENGTH 1. */
 		x = q->tail->next;
 		slot = &q->slots[x];
-		if (slot->next == x)
-			q->tail = NULL; /* no more active slots */
-		else
-			q->tail->next = slot->next;
+		q->tail->next = slot->next;
 		q->ht[slot->hash] = SFQ_EMPTY_SLOT;
 		goto drop;
 	}
@@ -634,15 +631,6 @@ static int sfq_change(struct Qdisc *sch, struct nlattr *opt,
 	struct red_parms *p = NULL;
 	struct sk_buff *to_free = NULL;
 	struct sk_buff *tail = NULL;
-	unsigned int maxflows;
-	unsigned int quantum;
-	unsigned int divisor;
-	int perturb_period;
-	u8 headdrop;
-	u8 maxdepth;
-	int limit;
-	u8 flags;
-
 
 	if (opt->nla_len < nla_attr_size(sizeof(*ctl)))
 		return -EINVAL;
@@ -656,14 +644,6 @@ static int sfq_change(struct Qdisc *sch, struct nlattr *opt,
 		NL_SET_ERR_MSG_MOD(extack, "invalid quantum");
 		return -EINVAL;
 	}
-
-	if (ctl->perturb_period < 0 ||
-	    ctl->perturb_period > INT_MAX / HZ) {
-		NL_SET_ERR_MSG_MOD(extack, "invalid perturb period");
-		return -EINVAL;
-	}
-	perturb_period = ctl->perturb_period * HZ;
-
 	if (ctl_v1 && !red_check_params(ctl_v1->qth_min, ctl_v1->qth_max,
 					ctl_v1->Wlog, ctl_v1->Scell_log, NULL))
 		return -EINVAL;
@@ -672,62 +652,39 @@ static int sfq_change(struct Qdisc *sch, struct nlattr *opt,
 		if (!p)
 			return -ENOMEM;
 	}
-
+	if (ctl->limit == 1) {
+		NL_SET_ERR_MSG_MOD(extack, "invalid limit");
+		return -EINVAL;
+	}
 	sch_tree_lock(sch);
-
-	limit = q->limit;
-	divisor = q->divisor;
-	headdrop = q->headdrop;
-	maxdepth = q->maxdepth;
-	maxflows = q->maxflows;
-	quantum = q->quantum;
-	flags = q->flags;
-
-	/* update and validate configuration */
 	if (ctl->quantum)
-		quantum = ctl->quantum;
+		q->quantum = ctl->quantum;
+	WRITE_ONCE(q->perturb_period, ctl->perturb_period * HZ);
 	if (ctl->flows)
-		maxflows = min_t(u32, ctl->flows, SFQ_MAX_FLOWS);
+		q->maxflows = min_t(u32, ctl->flows, SFQ_MAX_FLOWS);
 	if (ctl->divisor) {
-		divisor = ctl->divisor;
-		maxflows = min_t(u32, maxflows, divisor);
+		q->divisor = ctl->divisor;
+		q->maxflows = min_t(u32, q->maxflows, q->divisor);
 	}
 	if (ctl_v1) {
 		if (ctl_v1->depth)
-			maxdepth = min_t(u32, ctl_v1->depth, SFQ_MAX_DEPTH);
+			q->maxdepth = min_t(u32, ctl_v1->depth, SFQ_MAX_DEPTH);
 		if (p) {
-			red_set_parms(p,
+			swap(q->red_parms, p);
+			red_set_parms(q->red_parms,
 				      ctl_v1->qth_min, ctl_v1->qth_max,
 				      ctl_v1->Wlog,
 				      ctl_v1->Plog, ctl_v1->Scell_log,
 				      NULL,
 				      ctl_v1->max_P);
 		}
-		flags = ctl_v1->flags;
-		headdrop = ctl_v1->headdrop;
+		q->flags = ctl_v1->flags;
+		q->headdrop = ctl_v1->headdrop;
 	}
 	if (ctl->limit) {
-		limit = min_t(u32, ctl->limit, maxdepth * maxflows);
-		maxflows = min_t(u32, maxflows, limit);
+		q->limit = min_t(u32, ctl->limit, q->maxdepth * q->maxflows);
+		q->maxflows = min_t(u32, q->maxflows, q->limit);
 	}
-	if (limit == 1) {
-		sch_tree_unlock(sch);
-		kfree(p);
-		NL_SET_ERR_MSG_MOD(extack, "invalid limit");
-		return -EINVAL;
-	}
-
-	/* commit configuration */
-	q->limit = limit;
-	q->divisor = divisor;
-	q->headdrop = headdrop;
-	q->maxdepth = maxdepth;
-	q->maxflows = maxflows;
-	WRITE_ONCE(q->perturb_period, perturb_period);
-	q->quantum = quantum;
-	q->flags = flags;
-	if (p)
-		swap(q->red_parms, p);
 
 	qlen = sch->q.qlen;
 	while (sch->q.qlen > q->limit) {
@@ -964,6 +921,7 @@ static struct Qdisc_ops sfq_qdisc_ops __read_mostly = {
 	.dump		=	sfq_dump,
 	.owner		=	THIS_MODULE,
 };
+MODULE_ALIAS_NET_SCH("sfq");
 
 static int __init sfq_module_init(void)
 {
@@ -976,3 +934,4 @@ static void __exit sfq_module_exit(void)
 module_init(sfq_module_init)
 module_exit(sfq_module_exit)
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Stochastic Fairness qdisc");

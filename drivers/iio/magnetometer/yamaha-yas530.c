@@ -43,7 +43,7 @@
 #include <linux/iio/trigger_consumer.h>
 #include <linux/iio/triggered_buffer.h>
 
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 
 /* Commonly used registers */
 #define YAS5XX_DEVICE_ID		0x80
@@ -236,7 +236,7 @@ struct yas5xx {
 	 */
 	struct {
 		s32 channels[4];
-		s64 ts __aligned(8);
+		aligned_s64 ts;
 	} scan;
 };
 
@@ -1435,9 +1435,7 @@ static int yas5xx_probe(struct i2c_client *i2c)
 		goto assert_reset;
 	}
 
-	ci = device_get_match_data(dev);
-	if (!ci)
-		ci = (const struct yas5xx_chip_info *)id->driver_data;
+	ci = i2c_get_match_data(i2c);
 	yas5xx->chip_info = ci;
 
 	ret = regmap_read(yas5xx->map, YAS5XX_DEVICE_ID, &id_check);

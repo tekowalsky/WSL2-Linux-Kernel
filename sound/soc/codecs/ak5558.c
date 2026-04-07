@@ -9,7 +9,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/i2c.h>
 #include <linux/module.h>
-#include <linux/of_device.h>
+#include <linux/of.h>
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 #include <linux/regulator/consumer.h>
@@ -372,15 +372,7 @@ static int __maybe_unused ak5558_runtime_resume(struct device *dev)
 	regcache_cache_only(ak5558->regmap, false);
 	regcache_mark_dirty(ak5558->regmap);
 
-	ret = regcache_sync(ak5558->regmap);
-	if (ret)
-		goto err;
-
-	return 0;
-err:
-	regcache_cache_only(ak5558->regmap, true);
-	regulator_bulk_disable(ARRAY_SIZE(ak5558->supplies), ak5558->supplies);
-	return ret;
+	return regcache_sync(ak5558->regmap);
 }
 
 static const struct dev_pm_ops ak5558_pm = {

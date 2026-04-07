@@ -79,9 +79,6 @@
  */
 #define MCACOD_EXT_MEM_ERR	0x280
 
-/* Max RRL register sets per {,sub-,pseudo-}channel. */
-#define NUM_RRL_SET		3
-
 /*
  * Each cpu socket contains some pci devices that provide global
  * information, and also some that are local to each of the two
@@ -96,16 +93,6 @@ struct skx_dev {
 	struct pci_dev *uracu; /* for i10nm CPU */
 	struct pci_dev *pcu_cr3; /* for HBM memory detection */
 	u32 mcroute;
-	/*
-	 * Some server BIOS may hide certain memory controllers, and the
-	 * EDAC driver skips those hidden memory controllers. However, the
-	 * ADXL still decodes memory error address using physical memory
-	 * controller indices. The mapping table is used to convert the
-	 * physical indices (reported by ADXL) to the logical indices
-	 * (used the EDAC driver) of present memory controllers during the
-	 * error handling process.
-	 */
-	u8 mc_mapping[NUM_IMC];
 	struct skx_imc {
 		struct mem_ctl_info *mci;
 		struct pci_dev *mdev; /* for i10nm CPU */
@@ -116,15 +103,13 @@ struct skx_dev {
 		bool hbm_mc;
 		u8 mc;	/* system wide mc# */
 		u8 lmc;	/* socket relative mc# */
-		u8 src_id, node_id;
+		u8 src_id;
 		struct skx_channel {
 			struct pci_dev	*cdev;
 			struct pci_dev	*edev;
-			/*
-			 * Two groups of RRL control registers per channel to save default RRL
-			 * settings of two {sub-,pseudo-}channels in Linux RRL control mode.
-			 */
-			u32 rrl_ctl[2][NUM_RRL_SET];
+			u32 retry_rd_err_log_s;
+			u32 retry_rd_err_log_d;
+			u32 retry_rd_err_log_d2;
 			struct skx_dimm {
 				u8 close_pg;
 				u8 bank_xor_enable;
@@ -257,10 +242,8 @@ void skx_adxl_put(void);
 void skx_set_decode(skx_decode_f decode, skx_show_retry_log_f show_retry_log);
 void skx_set_mem_cfg(bool mem_cfg_2lm);
 void skx_set_res_cfg(struct res_config *cfg);
-void skx_set_mc_mapping(struct skx_dev *d, u8 pmc, u8 lmc);
 
 int skx_get_src_id(struct skx_dev *d, int off, u8 *id);
-int skx_get_node_id(struct skx_dev *d, u8 *id);
 
 int skx_get_all_bus_mappings(struct res_config *cfg, struct list_head **list);
 
@@ -282,5 +265,13 @@ int skx_mce_check_error(struct notifier_block *nb, unsigned long val,
 			void *data);
 
 void skx_remove(void);
+
+#ifdef CONFIG_EDAC_DEBUG
+void skx_setup_debug(const char *name);
+void skx_teardown_debug(void);
+#else
+static inline void skx_setup_debug(const char *name) {}
+static inline void skx_teardown_debug(void) {}
+#endif
 
 #endif /* _SKX_COMM_EDAC_H */

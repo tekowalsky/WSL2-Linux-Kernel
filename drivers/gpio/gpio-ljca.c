@@ -281,14 +281,22 @@ static void ljca_gpio_event_cb(void *context, u8 cmd, const void *evt_data,
 {
 	const struct ljca_gpio_packet *packet = evt_data;
 	struct ljca_gpio_dev *ljca_gpio = context;
-	int i;
+	int i, irq;
 
 	if (cmd != LJCA_GPIO_INT_EVENT)
 		return;
 
 	for (i = 0; i < packet->num; i++) {
-		generic_handle_domain_irq(ljca_gpio->gc.irq.domain,
-					packet->item[i].index);
+		irq = irq_find_mapping(ljca_gpio->gc.irq.domain,
+				       packet->item[i].index);
+		if (!irq) {
+			dev_err(ljca_gpio->gc.parent,
+				"gpio_id %u does not mapped to IRQ yet\n",
+				packet->item[i].index);
+			return;
+		}
+
+		generic_handle_domain_irq(ljca_gpio->gc.irq.domain, irq);
 		set_bit(packet->item[i].index, ljca_gpio->reenable_irqs);
 	}
 
@@ -412,8 +420,14 @@ static int ljca_gpio_probe(struct auxiliary_device *auxdev,
 	if (!ljca_gpio->connect_mode)
 		return -ENOMEM;
 
-	mutex_init(&ljca_gpio->irq_lock);
-	mutex_init(&ljca_gpio->trans_lock);
+	ret = devm_mutex_init(&auxdev->dev, &ljca_gpio->irq_lock);
+	if (ret)
+		return ret;
+
+	ret = devm_mutex_init(&auxdev->dev, &ljca_gpio->trans_lock);
+	if (ret)
+		return ret;
+
 	ljca_gpio->gc.direction_input = ljca_gpio_direction_input;
 	ljca_gpio->gc.direction_output = ljca_gpio_direction_output;
 	ljca_gpio->gc.get_direction = ljca_gpio_get_direction;
@@ -445,11 +459,8 @@ static int ljca_gpio_probe(struct auxiliary_device *auxdev,
 
 	INIT_WORK(&ljca_gpio->work, ljca_gpio_async);
 	ret = gpiochip_add_data(&ljca_gpio->gc, ljca_gpio);
-	if (ret) {
+	if (ret)
 		ljca_unregister_event_cb(ljca);
-		mutex_destroy(&ljca_gpio->irq_lock);
-		mutex_destroy(&ljca_gpio->trans_lock);
-	}
 
 	return ret;
 }
@@ -461,8 +472,6 @@ static void ljca_gpio_remove(struct auxiliary_device *auxdev)
 	gpiochip_remove(&ljca_gpio->gc);
 	ljca_unregister_event_cb(ljca_gpio->ljca);
 	cancel_work_sync(&ljca_gpio->work);
-	mutex_destroy(&ljca_gpio->irq_lock);
-	mutex_destroy(&ljca_gpio->trans_lock);
 }
 
 static const struct auxiliary_device_id ljca_gpio_id_table[] = {
@@ -483,4 +492,4 @@ MODULE_AUTHOR("Zhifeng Wang <zhifeng.wang@intel.com>");
 MODULE_AUTHOR("Lixu Zhang <lixu.zhang@intel.com>");
 MODULE_DESCRIPTION("Intel La Jolla Cove Adapter USB-GPIO driver");
 MODULE_LICENSE("GPL");
-MODULE_IMPORT_NS(LJCA);
+MODULE_IMPORT_NS("LJCA");

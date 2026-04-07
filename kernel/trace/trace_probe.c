@@ -12,6 +12,7 @@
 #define pr_fmt(fmt)	"trace_probe: " fmt
 
 #include <linux/bpf.h>
+#include <linux/fs.h>
 #include "trace_btf.h"
 
 #include "trace_probe.h"
@@ -153,12 +154,9 @@ fail:
 }
 
 static struct trace_probe_log trace_probe_log;
-extern struct mutex dyn_event_ops_mutex;
 
 void trace_probe_log_init(const char *subsystem, int argc, const char **argv)
 {
-	lockdep_assert_held(&dyn_event_ops_mutex);
-
 	trace_probe_log.subsystem = subsystem;
 	trace_probe_log.argc = argc;
 	trace_probe_log.argv = argv;
@@ -167,15 +165,11 @@ void trace_probe_log_init(const char *subsystem, int argc, const char **argv)
 
 void trace_probe_log_clear(void)
 {
-	lockdep_assert_held(&dyn_event_ops_mutex);
-
 	memset(&trace_probe_log, 0, sizeof(trace_probe_log));
 }
 
 void trace_probe_log_set_index(int index)
 {
-	lockdep_assert_held(&dyn_event_ops_mutex);
-
 	trace_probe_log.index = index;
 }
 
@@ -183,8 +177,6 @@ void __trace_probe_log_err(int offset, int err_type)
 {
 	char *command, *p;
 	int i, len = 0, pos = 0;
-
-	lockdep_assert_held(&dyn_event_ops_mutex);
 
 	if (!trace_probe_log.argv)
 		return;
@@ -656,7 +648,7 @@ static int parse_btf_arg(char *varname,
 		ret = query_btf_context(ctx);
 		if (ret < 0 || ctx->nr_params == 0) {
 			trace_probe_log_err(ctx->offset, NO_BTF_ENTRY);
-			return -ENOENT;
+			return PTR_ERR(params);
 		}
 	}
 	params = ctx->params;
@@ -778,10 +770,6 @@ static int check_prepare_btf_string_fetch(char *typename,
 
 #ifdef CONFIG_HAVE_FUNCTION_ARG_ACCESS_API
 
-/*
- * Add the entry code to store the 'argnum'th parameter and return the offset
- * in the entry data buffer where the data will be stored.
- */
 static int __store_entry_arg(struct trace_probe *tp, int argnum)
 {
 	struct probe_entry_arg *earg = tp->entry_arg;
@@ -805,20 +793,6 @@ static int __store_entry_arg(struct trace_probe *tp, int argnum)
 		tp->entry_arg = earg;
 	}
 
-	/*
-	 * The entry code array is repeating the pair of
-	 * [FETCH_OP_ARG(argnum)][FETCH_OP_ST_EDATA(offset of entry data buffer)]
-	 * and the rest of entries are filled with [FETCH_OP_END].
-	 *
-	 * To reduce the redundant function parameter fetching, we scan the entry
-	 * code array to find the FETCH_OP_ARG which already fetches the 'argnum'
-	 * parameter. If it doesn't match, update 'offset' to find the last
-	 * offset.
-	 * If we find the FETCH_OP_END without matching FETCH_OP_ARG entry, we
-	 * will save the entry with FETCH_OP_ARG and FETCH_OP_ST_EDATA, and
-	 * return data offset so that caller can find the data offset in the entry
-	 * data buffer.
-	 */
 	offset = 0;
 	for (i = 0; i < earg->size - 1; i++) {
 		switch (earg->code[i].op) {
@@ -852,16 +826,6 @@ int traceprobe_get_entry_data_size(struct trace_probe *tp)
 	if (!earg)
 		return 0;
 
-	/*
-	 * earg->code[] array has an operation sequence which is run in
-	 * the entry handler.
-	 * The sequence stopped by FETCH_OP_END and each data stored in
-	 * the entry data buffer by FETCH_OP_ST_EDATA. The FETCH_OP_ST_EDATA
-	 * stores the data at the data buffer + its offset, and all data are
-	 * "unsigned long" size. The offset must be increased when a data is
-	 * stored. Thus we need to find the last FETCH_OP_ST_EDATA in the
-	 * code array.
-	 */
 	for (i = 0; i < earg->size; i++) {
 		switch (earg->code[i].op) {
 		case FETCH_OP_END:
@@ -1221,8 +1185,6 @@ parse_probe_arg(char *arg, const struct fetch_type *type,
 	return ret;
 }
 
-#define BYTES_TO_BITS(nb)	((BITS_PER_LONG * (nb)) / sizeof(long))
-
 /* Bitfield type needs to be parsed into a fetch function */
 static int __parse_bitfield_probe_arg(const char *bf,
 				      const struct fetch_type *t,
@@ -1258,67 +1220,45 @@ static int __parse_bitfield_probe_arg(const char *bf,
 	return (BYTES_TO_BITS(t->size) < (bw + bo)) ? -EINVAL : 0;
 }
 
-/* String length checking wrapper */
-static int traceprobe_parse_probe_arg_body(const char *argv, ssize_t *size,
-					   struct probe_arg *parg,
-					   struct traceprobe_parse_context *ctx)
+/* Split type part from @arg and return it. */
+static char *parse_probe_arg_type(char *arg, struct probe_arg *parg,
+				  struct traceprobe_parse_context *ctx)
 {
-	struct fetch_insn *code, *scode, *tmp = NULL;
-	char *t, *t2, *t3;
-	int ret, len;
-	char *arg;
+	char *t = NULL, *t2, *t3;
+	int offs;
 
-	arg = kstrdup(argv, GFP_KERNEL);
-	if (!arg)
-		return -ENOMEM;
-
-	ret = -EINVAL;
-	len = strlen(arg);
-	if (len > MAX_ARGSTR_LEN) {
-		trace_probe_log_err(ctx->offset, ARG_TOO_LONG);
-		goto out;
-	} else if (len == 0) {
-		trace_probe_log_err(ctx->offset, NO_ARG_BODY);
-		goto out;
-	}
-
-	ret = -ENOMEM;
-	parg->comm = kstrdup(arg, GFP_KERNEL);
-	if (!parg->comm)
-		goto out;
-
-	ret = -EINVAL;
 	t = strchr(arg, ':');
 	if (t) {
-		*t = '\0';
-		t2 = strchr(++t, '[');
+		*t++ = '\0';
+		t2 = strchr(t, '[');
 		if (t2) {
 			*t2++ = '\0';
 			t3 = strchr(t2, ']');
 			if (!t3) {
-				int offs = t2 + strlen(t2) - arg;
+				offs = t2 + strlen(t2) - arg;
 
 				trace_probe_log_err(ctx->offset + offs,
 						    ARRAY_NO_CLOSE);
-				goto out;
+				return ERR_PTR(-EINVAL);
 			} else if (t3[1] != '\0') {
 				trace_probe_log_err(ctx->offset + t3 + 1 - arg,
 						    BAD_ARRAY_SUFFIX);
-				goto out;
+				return ERR_PTR(-EINVAL);
 			}
 			*t3 = '\0';
 			if (kstrtouint(t2, 0, &parg->count) || !parg->count) {
 				trace_probe_log_err(ctx->offset + t2 - arg,
 						    BAD_ARRAY_NUM);
-				goto out;
+				return ERR_PTR(-EINVAL);
 			}
 			if (parg->count > MAX_ARRAY_LEN) {
 				trace_probe_log_err(ctx->offset + t2 - arg,
 						    ARRAY_TOO_BIG);
-				goto out;
+				return ERR_PTR(-EINVAL);
 			}
 		}
 	}
+	offs = t ? t - arg : 0;
 
 	/*
 	 * Since $comm and immediate string can not be dereferenced,
@@ -1329,74 +1269,52 @@ static int traceprobe_parse_probe_arg_body(const char *argv, ssize_t *size,
 	     strncmp(arg, "\\\"", 2) == 0)) {
 		/* The type of $comm must be "string", and not an array type. */
 		if (parg->count || (t && strcmp(t, "string"))) {
-			trace_probe_log_err(ctx->offset + (t ? (t - arg) : 0),
-					NEED_STRING_TYPE);
-			goto out;
+			trace_probe_log_err(ctx->offset + offs, NEED_STRING_TYPE);
+			return ERR_PTR(-EINVAL);
 		}
 		parg->type = find_fetch_type("string", ctx->flags);
 	} else
 		parg->type = find_fetch_type(t, ctx->flags);
+
 	if (!parg->type) {
-		trace_probe_log_err(ctx->offset + (t ? (t - arg) : 0), BAD_TYPE);
-		goto out;
+		trace_probe_log_err(ctx->offset + offs, BAD_TYPE);
+		return ERR_PTR(-EINVAL);
 	}
 
-	code = tmp = kcalloc(FETCH_INSN_MAX, sizeof(*code), GFP_KERNEL);
-	if (!code)
-		goto out;
-	code[FETCH_INSN_MAX - 1].op = FETCH_OP_END;
+	return t;
+}
 
-	ctx->last_type = NULL;
-	ret = parse_probe_arg(arg, parg->type, &code, &code[FETCH_INSN_MAX - 1],
-			      ctx);
-	if (ret)
-		goto fail;
+/* After parsing, adjust the fetch_insn according to the probe_arg */
+static int finalize_fetch_insn(struct fetch_insn *code,
+			       struct probe_arg *parg,
+			       char *type,
+			       int type_offset,
+			       struct traceprobe_parse_context *ctx)
+{
+	struct fetch_insn *scode;
+	int ret;
 
-	/* Update storing type if BTF is available */
-	if (IS_ENABLED(CONFIG_PROBE_EVENTS_BTF_ARGS) &&
-	    ctx->last_type) {
-		if (!t) {
-			parg->type = find_fetch_type_from_btf_type(ctx);
-		} else if (strstr(t, "string")) {
-			ret = check_prepare_btf_string_fetch(t, &code, ctx);
-			if (ret)
-				goto fail;
-		}
-	}
-	parg->offset = *size;
-	*size += parg->type->size * (parg->count ?: 1);
-
-	if (parg->count) {
-		len = strlen(parg->type->fmttype) + 6;
-		parg->fmt = kmalloc(len, GFP_KERNEL);
-		if (!parg->fmt) {
-			ret = -ENOMEM;
-			goto out;
-		}
-		snprintf(parg->fmt, len, "%s[%d]", parg->type->fmttype,
-			 parg->count);
-	}
-
-	ret = -EINVAL;
 	/* Store operation */
 	if (parg->type->is_string) {
+		/* Check bad combination of the type and the last fetch_insn. */
 		if (!strcmp(parg->type->name, "symstr")) {
 			if (code->op != FETCH_OP_REG && code->op != FETCH_OP_STACK &&
 			    code->op != FETCH_OP_RETVAL && code->op != FETCH_OP_ARG &&
 			    code->op != FETCH_OP_DEREF && code->op != FETCH_OP_TP_ARG) {
-				trace_probe_log_err(ctx->offset + (t ? (t - arg) : 0),
+				trace_probe_log_err(ctx->offset + type_offset,
 						    BAD_SYMSTRING);
-				goto fail;
+				return -EINVAL;
 			}
 		} else {
 			if (code->op != FETCH_OP_DEREF && code->op != FETCH_OP_UDEREF &&
 			    code->op != FETCH_OP_IMM && code->op != FETCH_OP_COMM &&
 			    code->op != FETCH_OP_DATA && code->op != FETCH_OP_TP_ARG) {
-				trace_probe_log_err(ctx->offset + (t ? (t - arg) : 0),
+				trace_probe_log_err(ctx->offset + type_offset,
 						    BAD_STRING);
-				goto fail;
+				return -EINVAL;
 			}
 		}
+
 		if (!strcmp(parg->type->name, "symstr") ||
 		    (code->op == FETCH_OP_IMM || code->op == FETCH_OP_COMM ||
 		     code->op == FETCH_OP_DATA) || code->op == FETCH_OP_TP_ARG ||
@@ -1412,9 +1330,10 @@ static int traceprobe_parse_probe_arg_body(const char *argv, ssize_t *size,
 			code++;
 			if (code->op != FETCH_OP_NOP) {
 				trace_probe_log_err(ctx->offset, TOO_MANY_OPS);
-				goto fail;
+				return -EINVAL;
 			}
 		}
+
 		/* If op == DEREF, replace it with STRING */
 		if (!strcmp(parg->type->name, "ustring") ||
 		    code->op == FETCH_OP_UDEREF)
@@ -1435,47 +1354,128 @@ static int traceprobe_parse_probe_arg_body(const char *argv, ssize_t *size,
 		code++;
 		if (code->op != FETCH_OP_NOP) {
 			trace_probe_log_err(ctx->offset, TOO_MANY_OPS);
-			goto fail;
+			return -E2BIG;
 		}
 		code->op = FETCH_OP_ST_RAW;
 		code->size = parg->type->size;
 	}
+
+	/* Save storing fetch_insn. */
 	scode = code;
+
 	/* Modify operation */
-	if (t != NULL) {
-		ret = __parse_bitfield_probe_arg(t, parg->type, &code);
+	if (type != NULL) {
+		/* Bitfield needs a special fetch_insn. */
+		ret = __parse_bitfield_probe_arg(type, parg->type, &code);
 		if (ret) {
-			trace_probe_log_err(ctx->offset + t - arg, BAD_BITFIELD);
-			goto fail;
+			trace_probe_log_err(ctx->offset + type_offset, BAD_BITFIELD);
+			return ret;
 		}
 	} else if (IS_ENABLED(CONFIG_PROBE_EVENTS_BTF_ARGS) &&
 		   ctx->last_type) {
+		/* If user not specified the type, try parsing BTF bitfield. */
 		ret = parse_btf_bitfield(&code, ctx);
 		if (ret)
-			goto fail;
+			return ret;
 	}
-	ret = -EINVAL;
+
 	/* Loop(Array) operation */
 	if (parg->count) {
 		if (scode->op != FETCH_OP_ST_MEM &&
 		    scode->op != FETCH_OP_ST_STRING &&
 		    scode->op != FETCH_OP_ST_USTRING) {
-			trace_probe_log_err(ctx->offset + (t ? (t - arg) : 0),
-					    BAD_STRING);
-			goto fail;
+			trace_probe_log_err(ctx->offset + type_offset, BAD_STRING);
+			return -EINVAL;
 		}
 		code++;
 		if (code->op != FETCH_OP_NOP) {
 			trace_probe_log_err(ctx->offset, TOO_MANY_OPS);
-			goto fail;
+			return -E2BIG;
 		}
 		code->op = FETCH_OP_LP_ARRAY;
 		code->param = parg->count;
 	}
+
+	/* Finalize the fetch_insn array. */
 	code++;
 	code->op = FETCH_OP_END;
 
-	ret = 0;
+	return 0;
+}
+
+/* String length checking wrapper */
+static int traceprobe_parse_probe_arg_body(const char *argv, ssize_t *size,
+					   struct probe_arg *parg,
+					   struct traceprobe_parse_context *ctx)
+{
+	struct fetch_insn *code, *tmp = NULL;
+	char *type, *arg __free(kfree) = NULL;
+	int ret, len;
+
+	len = strlen(argv);
+	if (len > MAX_ARGSTR_LEN) {
+		trace_probe_log_err(ctx->offset, ARG_TOO_LONG);
+		return -E2BIG;
+	} else if (len == 0) {
+		trace_probe_log_err(ctx->offset, NO_ARG_BODY);
+		return -EINVAL;
+	}
+
+	arg = kstrdup(argv, GFP_KERNEL);
+	if (!arg)
+		return -ENOMEM;
+
+	parg->comm = kstrdup(arg, GFP_KERNEL);
+	if (!parg->comm)
+		return -ENOMEM;
+
+	type = parse_probe_arg_type(arg, parg, ctx);
+	if (IS_ERR(type))
+		return PTR_ERR(type);
+
+	code = tmp = kcalloc(FETCH_INSN_MAX, sizeof(*code), GFP_KERNEL);
+	if (!code)
+		return -ENOMEM;
+	code[FETCH_INSN_MAX - 1].op = FETCH_OP_END;
+
+	ctx->last_type = NULL;
+	ret = parse_probe_arg(arg, parg->type, &code, &code[FETCH_INSN_MAX - 1],
+			      ctx);
+	if (ret < 0)
+		goto fail;
+
+	/* Update storing type if BTF is available */
+	if (IS_ENABLED(CONFIG_PROBE_EVENTS_BTF_ARGS) &&
+	    ctx->last_type) {
+		if (!type) {
+			parg->type = find_fetch_type_from_btf_type(ctx);
+		} else if (strstr(type, "string")) {
+			ret = check_prepare_btf_string_fetch(type, &code, ctx);
+			if (ret)
+				goto fail;
+		}
+	}
+	parg->offset = *size;
+	*size += parg->type->size * (parg->count ?: 1);
+
+	if (parg->count) {
+		len = strlen(parg->type->fmttype) + 6;
+		parg->fmt = kmalloc(len, GFP_KERNEL);
+		if (!parg->fmt) {
+			ret = -ENOMEM;
+			goto fail;
+		}
+		snprintf(parg->fmt, len, "%s[%d]", parg->type->fmttype,
+			 parg->count);
+	}
+
+	ret = finalize_fetch_insn(code, parg, type, type ? type - arg : 0, ctx);
+	if (ret < 0)
+		goto fail;
+
+	for (; code < tmp + FETCH_INSN_MAX; code++)
+		if (code->op == FETCH_OP_END)
+			break;
 	/* Shrink down the code buffer */
 	parg->code = kcalloc(code - tmp + 1, sizeof(*code), GFP_KERNEL);
 	if (!parg->code)
@@ -1484,15 +1484,13 @@ static int traceprobe_parse_probe_arg_body(const char *argv, ssize_t *size,
 		memcpy(parg->code, tmp, sizeof(*code) * (code - tmp + 1));
 
 fail:
-	if (ret) {
+	if (ret < 0) {
 		for (code = tmp; code < tmp + FETCH_INSN_MAX; code++)
 			if (code->op == FETCH_NOP_SYMBOL ||
 			    code->op == FETCH_OP_DATA)
 				kfree(code->data);
 	}
 	kfree(tmp);
-out:
-	kfree(arg);
 
 	return ret;
 }
@@ -1662,7 +1660,7 @@ const char **traceprobe_expand_meta_args(int argc, const char *argv[],
 {
 	const struct btf_param *params = NULL;
 	int i, j, n, used, ret, args_idx = -1;
-	const char **new_argv = NULL;
+	const char **new_argv __free(kfree) = NULL;
 
 	ret = argv_has_var_arg(argc, argv, &args_idx, ctx);
 	if (ret < 0)
@@ -1701,7 +1699,7 @@ const char **traceprobe_expand_meta_args(int argc, const char *argv[],
 				ret = sprint_nth_btf_arg(n, "", buf + used,
 							 bufsize - used, ctx);
 				if (ret < 0)
-					goto error;
+					return ERR_PTR(ret);
 
 				new_argv[j++] = buf + used;
 				used += ret + 1;
@@ -1715,25 +1713,78 @@ const char **traceprobe_expand_meta_args(int argc, const char *argv[],
 			n = simple_strtoul(argv[i] + 4, &type, 10);
 			if (type && !(*type == ':' || *type == '\0')) {
 				trace_probe_log_err(0, BAD_VAR);
-				ret = -ENOENT;
-				goto error;
+				return ERR_PTR(-ENOENT);
 			}
 			/* Note: $argN starts from $arg1 */
 			ret = sprint_nth_btf_arg(n - 1, type, buf + used,
 						 bufsize - used, ctx);
 			if (ret < 0)
-				goto error;
+				return ERR_PTR(ret);
 			new_argv[j++] = buf + used;
 			used += ret + 1;
 		} else
 			new_argv[j++] = argv[i];
 	}
 
-	return new_argv;
+	return_ptr(new_argv);
+}
 
-error:
-	kfree(new_argv);
-	return ERR_PTR(ret);
+/* @buf: *buf must be equal to NULL. Caller must to free *buf */
+int traceprobe_expand_dentry_args(int argc, const char *argv[], char **buf)
+{
+	int i, used, ret;
+	const int bufsize = MAX_DENTRY_ARGS_LEN;
+	char *tmpbuf __free(kfree) = NULL;
+
+	if (*buf)
+		return -EINVAL;
+
+	used = 0;
+	for (i = 0; i < argc; i++) {
+		char *tmp __free(kfree) = NULL;
+		char *equal;
+		size_t arg_len;
+
+		if (!glob_match("*:%p[dD]", argv[i]))
+			continue;
+
+		if (!tmpbuf) {
+			tmpbuf = kmalloc(bufsize, GFP_KERNEL);
+			if (!tmpbuf)
+				return -ENOMEM;
+		}
+
+		tmp = kstrdup(argv[i], GFP_KERNEL);
+		if (!tmp)
+			return -ENOMEM;
+
+		equal = strchr(tmp, '=');
+		if (equal)
+			*equal = '\0';
+		arg_len = strlen(argv[i]);
+		tmp[arg_len - 4] = '\0';
+		if (argv[i][arg_len - 1] == 'd')
+			ret = snprintf(tmpbuf + used, bufsize - used,
+				       "%s%s+0x0(+0x%zx(%s)):string",
+				       equal ? tmp : "", equal ? "=" : "",
+				       offsetof(struct dentry, d_name.name),
+				       equal ? equal + 1 : tmp);
+		else
+			ret = snprintf(tmpbuf + used, bufsize - used,
+				       "%s%s+0x0(+0x%zx(+0x%zx(%s))):string",
+				       equal ? tmp : "", equal ? "=" : "",
+				       offsetof(struct dentry, d_name.name),
+				       offsetof(struct file, f_path.dentry),
+				       equal ? equal + 1 : tmp);
+
+		if (ret >= bufsize - used)
+			return -ENOMEM;
+		argv[i] = tmpbuf + used;
+		used += ret + 1;
+	}
+
+	*buf = no_free_ptr(tmpbuf);
+	return 0;
 }
 
 void traceprobe_finish_parse(struct traceprobe_parse_context *ctx)

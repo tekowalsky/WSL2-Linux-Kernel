@@ -2036,7 +2036,6 @@ static void xgbe_set_rx_adap_mode(struct xgbe_prv_data *pdata,
 {
 	if (pdata->rx_adapt_retries++ >= MAX_RX_ADAPT_RETRIES) {
 		pdata->rx_adapt_retries = 0;
-		pdata->mode_set = false;
 		return;
 	}
 
@@ -2083,7 +2082,6 @@ static void xgbe_rx_adaptation(struct xgbe_prv_data *pdata)
 		 */
 		netif_dbg(pdata, link, pdata->netdev, "Block_lock done");
 		pdata->rx_adapt_done = true;
-		pdata->rx_adapt_retries = 0;
 		pdata->mode_set = false;
 		return;
 	}
@@ -2857,7 +2855,8 @@ static bool xgbe_phy_valid_speed(struct xgbe_prv_data *pdata, int speed)
 static int xgbe_phy_link_status(struct xgbe_prv_data *pdata, int *an_restart)
 {
 	struct xgbe_phy_data *phy_data = pdata->phy_data;
-	int reg, ret;
+	unsigned int reg;
+	int ret;
 
 	*an_restart = 0;
 
@@ -2891,20 +2890,11 @@ static int xgbe_phy_link_status(struct xgbe_prv_data *pdata, int *an_restart)
 			return 0;
 	}
 
-	reg = XMDIO_READ(pdata, MDIO_MMD_PCS, MDIO_STAT1);
-	if (reg < 0)
-		return reg;
-
-	/* Link status is latched low so that momentary link drops
-	 * can be detected. If link was already down read again
-	 * to get the latest state.
+	/* Link status is latched low, so read once to clear
+	 * and then read again to get current state
 	 */
-
-	if (!pdata->phy.link && !(reg & MDIO_STAT1_LSTATUS)) {
-		reg = XMDIO_READ(pdata, MDIO_MMD_PCS, MDIO_STAT1);
-		if (reg < 0)
-			return reg;
-	}
+	reg = XMDIO_READ(pdata, MDIO_MMD_PCS, MDIO_STAT1);
+	reg = XMDIO_READ(pdata, MDIO_MMD_PCS, MDIO_STAT1);
 
 	if (pdata->en_rx_adap) {
 		/* if the link is available and adaptation is done,
@@ -2923,7 +2913,9 @@ static int xgbe_phy_link_status(struct xgbe_prv_data *pdata, int *an_restart)
 			xgbe_phy_set_mode(pdata, phy_data->cur_mode);
 		}
 
-		if (pdata->rx_adapt_done)
+		/* check again for the link and adaptation status */
+		reg = XMDIO_READ(pdata, MDIO_MMD_PCS, MDIO_STAT1);
+		if ((reg & MDIO_STAT1_LSTATUS) && pdata->rx_adapt_done)
 			return 1;
 	} else if (reg & MDIO_STAT1_LSTATUS)
 		return 1;

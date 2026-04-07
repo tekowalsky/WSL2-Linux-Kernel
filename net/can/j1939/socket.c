@@ -520,9 +520,6 @@ static int j1939_sk_bind(struct socket *sock, struct sockaddr *uaddr, int len)
 	ret = j1939_local_ecu_get(priv, jsk->addr.src_name, jsk->addr.sa);
 	if (ret) {
 		j1939_netdev_stop(priv);
-		jsk->priv = NULL;
-		synchronize_rcu();
-		j1939_priv_put(priv);
 		goto out_release_sock;
 	}
 
@@ -901,7 +898,7 @@ static struct sk_buff *j1939_sk_alloc_skb(struct net_device *ndev,
 	skcb = j1939_skb_to_cb(skb);
 	memset(skcb, 0, sizeof(*skcb));
 	skcb->addr = jsk->addr;
-	skcb->priority = j1939_prio(sk->sk_priority);
+	skcb->priority = j1939_prio(READ_ONCE(sk->sk_priority));
 
 	if (msg->msg_name) {
 		struct sockaddr_can *addr = msg->msg_name;

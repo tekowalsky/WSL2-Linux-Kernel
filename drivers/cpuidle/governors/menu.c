@@ -14,8 +14,6 @@
 #include <linux/ktime.h>
 #include <linux/hrtimer.h>
 #include <linux/tick.h>
-#include <linux/sched.h>
-#include <linux/sched/loadavg.h>
 #include <linux/sched/stat.h>
 #include <linux/math64.h>
 
@@ -76,35 +74,6 @@
  * intervals and if the stand deviation of these 8 intervals is below a
  * threshold value, we use the average of these intervals as prediction.
  *
- * Limiting Performance Impact
- * ---------------------------
- * C states, especially those with large exit latencies, can have a real
- * noticeable impact on workloads, which is not acceptable for most sysadmins,
- * and in addition, less performance has a power price of its own.
- *
- * As a general rule of thumb, menu assumes that the following heuristic
- * holds:
- *     The busier the system, the less impact of C states is acceptable
- *
- * This rule-of-thumb is implemented using a performance-multiplier:
- * If the exit latency times the performance multiplier is longer than
- * the predicted duration, the C state is not considered a candidate
- * for selection due to a too high performance impact. So the higher
- * this multiplier is, the longer we need to be idle to pick a deep C
- * state, and thus the less likely a busy CPU will hit such a deep
- * C state.
- *
- * Two factors are used in determing this multiplier:
- * a value of 10 is added for each point of "per cpu load average" we have.
- * a value of 5 points is added for each process that is waiting for
- * IO on this CPU.
- * (these values are experimentally determined)
- *
- * The load average factor gives a longer term (few seconds) input to the
- * decision, while the iowait value gives a cpu local instantanious input.
- * The iowait factor may look low, but realize that this is also already
- * represented in the system load average.
- *
  */
 
 struct menu_device {
@@ -136,14 +105,6 @@ static inline int which_bucket(u64 duration_ns)
 }
 
 static DEFINE_PER_CPU(struct menu_device, menu_devices);
-
-static void menu_update_intervals(struct menu_device *data, unsigned int interval_us)
-{
-	/* Update the repeating-pattern data. */
-	data->intervals[data->interval_ptr++] = interval_us;
-	if (data->interval_ptr >= INTERVALS)
-		data->interval_ptr = 0;
-}
 
 static void menu_update(struct cpuidle_driver *drv, struct cpuidle_device *dev);
 
@@ -230,16 +191,8 @@ again:
 	 *
 	 * This can deal with workloads that have long pauses interspersed
 	 * with sporadic activity with a bunch of short pauses.
-	 *
-	 * However, if the number of remaining samples is too small to exclude
-	 * any more outliers, allow the deepest available idle state to be
-	 * selected because there are systems where the time spent by CPUs in
-	 * deep idle states is correlated to the maximum frequency the CPUs
-	 * can get to.  On those systems, shallow idle states should be avoided
-	 * unless there is a clear indication that the given CPU is most likley
-	 * going to be woken up shortly.
 	 */
-	if (divisor * 4 <= INTERVALS * 3)
+	if ((divisor * 4) <= INTERVALS * 3)
 		return UINT_MAX;
 
 	thresh = max - 1;
@@ -264,14 +217,6 @@ static int menu_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 	if (data->needs_update) {
 		menu_update(drv, dev);
 		data->needs_update = 0;
-	} else if (!dev->last_residency_ns) {
-		/*
-		 * This happens when the driver rejects the previously selected
-		 * idle state and returns an error, so update the recent
-		 * intervals table to prevent invalid information from being
-		 * used going forward.
-		 */
-		menu_update_intervals(data, UINT_MAX);
 	}
 
 	/* Find the shortest expected idle interval. */
@@ -321,15 +266,20 @@ static int menu_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 		return 0;
 	}
 
-	/*
-	 * If the tick is already stopped, the cost of possible short idle
-	 * duration misprediction is much higher, because the CPU may be stuck
-	 * in a shallow idle state for a long time as a result of it.  In that
-	 * case, say we might mispredict and use the known time till the closest
-	 * timer event for the idle state selection.
-	 */
-	if (tick_nohz_tick_stopped() && predicted_ns < TICK_NSEC)
-		predicted_ns = data->next_timer_ns;
+	if (tick_nohz_tick_stopped()) {
+		/*
+		 * If the tick is already stopped, the cost of possible short
+		 * idle duration misprediction is much higher, because the CPU
+		 * may be stuck in a shallow idle state for a long time as a
+		 * result of it.  In that case say we might mispredict and use
+		 * the known time till the closest timer event for the idle
+		 * state selection.
+		 */
+		if (predicted_ns < TICK_NSEC)
+			predicted_ns = data->next_timer_ns;
+	} else if (latency_req > predicted_ns) {
+		latency_req = predicted_ns;
+	}
 
 	/*
 	 * Find the idle state with the lowest power while satisfying
@@ -345,54 +295,48 @@ static int menu_select(struct cpuidle_driver *drv, struct cpuidle_device *dev,
 		if (idx == -1)
 			idx = i; /* first enabled state */
 
+		if (s->target_residency_ns > predicted_ns) {
+			/*
+			 * Use a physical idle state, not busy polling, unless
+			 * a timer is going to trigger soon enough.
+			 */
+			if ((drv->states[idx].flags & CPUIDLE_FLAG_POLLING) &&
+			    s->exit_latency_ns <= latency_req &&
+			    s->target_residency_ns <= data->next_timer_ns) {
+				predicted_ns = s->target_residency_ns;
+				idx = i;
+				break;
+			}
+			if (predicted_ns < TICK_NSEC)
+				break;
+
+			if (!tick_nohz_tick_stopped()) {
+				/*
+				 * If the state selected so far is shallow,
+				 * waking up early won't hurt, so retain the
+				 * tick in that case and let the governor run
+				 * again in the next iteration of the loop.
+				 */
+				predicted_ns = drv->states[idx].target_residency_ns;
+				break;
+			}
+
+			/*
+			 * If the state selected so far is shallow and this
+			 * state's target residency matches the time till the
+			 * closest timer event, select this one to avoid getting
+			 * stuck in the shallow one for too long.
+			 */
+			if (drv->states[idx].target_residency_ns < TICK_NSEC &&
+			    s->target_residency_ns <= delta_tick)
+				idx = i;
+
+			return idx;
+		}
 		if (s->exit_latency_ns > latency_req)
 			break;
 
-		if (s->target_residency_ns <= predicted_ns) {
-			idx = i;
-			continue;
-		}
-
-		/*
-		 * Use a physical idle state instead of busy polling so long as
-		 * its target residency is below the residency threshold, its
-		 * exit latency is not greater than the predicted idle duration,
-		 * and the next timer doesn't expire soon.
-		 */
-		if ((drv->states[idx].flags & CPUIDLE_FLAG_POLLING) &&
-		    s->target_residency_ns < RESIDENCY_THRESHOLD_NS &&
-		    s->target_residency_ns <= data->next_timer_ns &&
-		    s->exit_latency_ns <= predicted_ns) {
-			predicted_ns = s->target_residency_ns;
-			idx = i;
-			break;
-		}
-
-		if (predicted_ns < TICK_NSEC)
-			break;
-
-		if (!tick_nohz_tick_stopped()) {
-			/*
-			 * If the state selected so far is shallow, waking up
-			 * early won't hurt, so retain the tick in that case and
-			 * let the governor run again in the next iteration of
-			 * the idle loop.
-			 */
-			predicted_ns = drv->states[idx].target_residency_ns;
-			break;
-		}
-
-		/*
-		 * If the state selected so far is shallow and this state's
-		 * target residency matches the time till the closest timer
-		 * event, select this one to avoid getting stuck in the shallow
-		 * one for too long.
-		 */
-		if (drv->states[idx].target_residency_ns < TICK_NSEC &&
-		    s->target_residency_ns <= delta_tick)
-			idx = i;
-
-		return idx;
+		idx = i;
 	}
 
 	if (idx == -1)
@@ -533,7 +477,10 @@ static void menu_update(struct cpuidle_driver *drv, struct cpuidle_device *dev)
 
 	data->correction_factor[data->bucket] = new_factor;
 
-	menu_update_intervals(data, ktime_to_us(measured_ns));
+	/* update the repeating-pattern data */
+	data->intervals[data->interval_ptr++] = ktime_to_us(measured_ns);
+	if (data->interval_ptr >= INTERVALS)
+		data->interval_ptr = 0;
 }
 
 /**

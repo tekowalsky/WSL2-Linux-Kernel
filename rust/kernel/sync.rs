@@ -11,10 +11,14 @@ mod arc;
 mod condvar;
 pub mod lock;
 mod locked_by;
+pub mod poll;
+pub mod rcu;
 
 pub use arc::{Arc, ArcBorrow, UniqueArc};
-pub use condvar::CondVar;
-pub use lock::{mutex::Mutex, spinlock::SpinLock};
+pub use condvar::{new_condvar, CondVar, CondVarTimeoutResult};
+pub use lock::global::{global_lock, GlobalGuard, GlobalLock, GlobalLockBackend, GlobalLockedBy};
+pub use lock::mutex::{new_mutex, Mutex, MutexGuard};
+pub use lock::spinlock::{new_spinlock, SpinLock, SpinLockGuard};
 pub use locked_by::LockedBy;
 
 /// Represents a lockdep class. It's a wrapper around C's `lock_class_key`.

@@ -116,8 +116,7 @@ static void __commit(struct work_struct *_ws)
 	 */
 	spin_lock_irq(&b->lock);
 	list_splice_init(&b->work_items, &work_items);
-	bio_list_merge(&bios, &b->bios);
-	bio_list_init(&b->bios);
+	bio_list_merge_init(&bios, &b->bios);
 	b->commit_scheduled = false;
 	spin_unlock_irq(&b->lock);
 
@@ -566,8 +565,7 @@ static void defer_bio(struct cache *cache, struct bio *bio)
 static void defer_bios(struct cache *cache, struct bio_list *bios)
 {
 	spin_lock_irq(&cache->lock);
-	bio_list_merge(&cache->deferred_bios, bios);
-	bio_list_init(bios);
+	bio_list_merge_init(&cache->deferred_bios, bios);
 	spin_unlock_irq(&cache->lock);
 
 	wake_deferred_bio_worker(cache);
@@ -1371,7 +1369,7 @@ static void mg_copy(struct work_struct *ws)
 			 */
 			bool rb = bio_detain_shared(mg->cache, mg->op->oblock, mg->overwrite_bio);
 
-			BUG_ON(rb); /* An exclussive lock must _not_ be held for this block */
+			BUG_ON(rb); /* An exclusive lock must _not_ be held for this block */
 			mg->overwrite_bio = NULL;
 			inc_io_migrations(mg->cache);
 			mg_full_copy(ws);
@@ -1817,8 +1815,7 @@ static void process_deferred_bios(struct work_struct *ws)
 	bio_list_init(&bios);
 
 	spin_lock_irq(&cache->lock);
-	bio_list_merge(&bios, &cache->deferred_bios);
-	bio_list_init(&cache->deferred_bios);
+	bio_list_merge_init(&bios, &cache->deferred_bios);
 	spin_unlock_irq(&cache->lock);
 
 	while ((bio = bio_list_pop(&bios))) {
@@ -1848,8 +1845,7 @@ static void requeue_deferred_bios(struct cache *cache)
 	struct bio_list bios;
 
 	bio_list_init(&bios);
-	bio_list_merge(&bios, &cache->deferred_bios);
-	bio_list_init(&cache->deferred_bios);
+	bio_list_merge_init(&bios, &cache->deferred_bios);
 
 	while ((bio = bio_list_pop(&bios))) {
 		bio->bi_status = BLK_STS_DM_REQUEUE;
@@ -2903,27 +2899,6 @@ static dm_cblock_t get_cache_dev_size(struct cache *cache)
 	return to_cblock(size);
 }
 
-static bool can_resume(struct cache *cache)
-{
-	/*
-	 * Disallow retrying the resume operation for devices that failed the
-	 * first resume attempt, as the failure leaves the policy object partially
-	 * initialized. Retrying could trigger BUG_ON when loading cache mappings
-	 * into the incomplete policy object.
-	 */
-	if (cache->sized && !cache->loaded_mappings) {
-		if (get_cache_mode(cache) != CM_WRITE)
-			DMERR("%s: unable to resume a failed-loaded cache, please check metadata.",
-			      cache_device_name(cache));
-		else
-			DMERR("%s: unable to resume cache due to missing proper cache table reload",
-			      cache_device_name(cache));
-		return false;
-	}
-
-	return true;
-}
-
 static bool can_resize(struct cache *cache, dm_cblock_t new_size)
 {
 	if (from_cblock(new_size) > from_cblock(cache->cache_size)) {
@@ -2971,9 +2946,6 @@ static int cache_preresume(struct dm_target *ti)
 	int r = 0;
 	struct cache *cache = ti->private;
 	dm_cblock_t csize = get_cache_dev_size(cache);
-
-	if (!can_resume(cache))
-		return -EINVAL;
 
 	/*
 	 * Check to see if the cache has resized.
@@ -3230,8 +3202,6 @@ static int parse_cblock_range(struct cache *cache, const char *str,
 	 * Try and parse form (ii) first.
 	 */
 	r = sscanf(str, "%llu-%llu%c", &b, &e, &dummy);
-	if (r < 0)
-		return r;
 
 	if (r == 2) {
 		result->begin = to_cblock(b);
@@ -3243,8 +3213,6 @@ static int parse_cblock_range(struct cache *cache, const char *str,
 	 * That didn't work, try form (i).
 	 */
 	r = sscanf(str, "%llu%c", &b, &dummy);
-	if (r < 0)
-		return r;
 
 	if (r == 1) {
 		result->begin = to_cblock(b);
@@ -3394,7 +3362,7 @@ static int cache_iterate_devices(struct dm_target *ti,
 static void disable_passdown_if_not_supported(struct cache *cache)
 {
 	struct block_device *origin_bdev = cache->origin_dev->bdev;
-	struct queue_limits *origin_limits = &bdev_get_queue(origin_bdev)->limits;
+	struct queue_limits *origin_limits = bdev_limits(origin_bdev);
 	const char *reason = NULL;
 
 	if (!cache->features.discard_passdown)
@@ -3416,12 +3384,12 @@ static void disable_passdown_if_not_supported(struct cache *cache)
 static void set_discard_limits(struct cache *cache, struct queue_limits *limits)
 {
 	struct block_device *origin_bdev = cache->origin_dev->bdev;
-	struct queue_limits *origin_limits = &bdev_get_queue(origin_bdev)->limits;
+	struct queue_limits *origin_limits = bdev_limits(origin_bdev);
 
 	if (!cache->features.discard_passdown) {
 		/* No passdown is done so setting own virtual limits */
-		limits->max_discard_sectors = min_t(sector_t, cache->discard_block_size * 1024,
-						    cache->origin_sectors);
+		limits->max_hw_discard_sectors = min_t(sector_t, cache->discard_block_size * 1024,
+						       cache->origin_sectors);
 		limits->discard_granularity = cache->discard_block_size << SECTOR_SHIFT;
 		return;
 	}
@@ -3430,11 +3398,9 @@ static void set_discard_limits(struct cache *cache, struct queue_limits *limits)
 	 * cache_iterate_devices() is stacking both origin and fast device limits
 	 * but discards aren't passed to fast device, so inherit origin's limits.
 	 */
-	limits->max_discard_sectors = origin_limits->max_discard_sectors;
 	limits->max_hw_discard_sectors = origin_limits->max_hw_discard_sectors;
 	limits->discard_granularity = origin_limits->discard_granularity;
 	limits->discard_alignment = origin_limits->discard_alignment;
-	limits->discard_misaligned = origin_limits->discard_misaligned;
 }
 
 static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
@@ -3448,8 +3414,8 @@ static void cache_io_hints(struct dm_target *ti, struct queue_limits *limits)
 	 */
 	if (io_opt_sectors < cache->sectors_per_block ||
 	    do_div(io_opt_sectors, cache->sectors_per_block)) {
-		blk_limits_io_min(limits, cache->sectors_per_block << SECTOR_SHIFT);
-		blk_limits_io_opt(limits, cache->sectors_per_block << SECTOR_SHIFT);
+		limits->io_min = cache->sectors_per_block << SECTOR_SHIFT;
+		limits->io_opt = cache->sectors_per_block << SECTOR_SHIFT;
 	}
 
 	disable_passdown_if_not_supported(cache);

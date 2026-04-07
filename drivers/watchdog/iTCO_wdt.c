@@ -580,8 +580,8 @@ static int iTCO_wdt_probe(struct platform_device *pdev)
 	}
 
 	ident.firmware_version = p->iTCO_version;
-	p->wddev.info = &ident,
-	p->wddev.ops = &iTCO_wdt_ops,
+	p->wddev.info = &ident;
+	p->wddev.ops = &iTCO_wdt_ops;
 	p->wddev.bootstatus = 0;
 	p->wddev.timeout = WATCHDOG_TIMEOUT;
 	watchdog_set_nowayout(&p->wddev, nowayout);
@@ -601,11 +601,7 @@ static int iTCO_wdt_probe(struct platform_device *pdev)
 	/* Check that the heartbeat value is within it's range;
 	   if not reset to the default */
 	if (iTCO_wdt_set_timeout(&p->wddev, heartbeat)) {
-		ret = iTCO_wdt_set_timeout(&p->wddev, WATCHDOG_TIMEOUT);
-		if (ret != 0) {
-			dev_err(dev, "Failed to set watchdog timeout (%d)\n", WATCHDOG_TIMEOUT);
-			return ret;
-		}
+		iTCO_wdt_set_timeout(&p->wddev, WATCHDOG_TIMEOUT);
 		dev_info(dev, "timeout value out of range, using %d\n",
 			WATCHDOG_TIMEOUT);
 	}
@@ -613,10 +609,8 @@ static int iTCO_wdt_probe(struct platform_device *pdev)
 	watchdog_stop_on_reboot(&p->wddev);
 	watchdog_stop_on_unregister(&p->wddev);
 	ret = devm_watchdog_register_device(dev, &p->wddev);
-	if (ret != 0) {
-		dev_err(dev, "cannot register watchdog device (err=%d)\n", ret);
+	if (ret != 0)
 		return ret;
-	}
 
 	dev_info(dev, "initialized. heartbeat=%d sec (nowayout=%d)\n",
 		heartbeat, nowayout);
