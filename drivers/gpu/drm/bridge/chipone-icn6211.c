@@ -197,7 +197,7 @@ static const struct regmap_config chipone_regmap_config = {
 	.val_bits = 8,
 	.rd_table = &chipone_dsi_readable_table,
 	.wr_table = &chipone_dsi_writeable_table,
-	.cache_type = REGCACHE_RBTREE,
+	.cache_type = REGCACHE_MAPLE,
 	.max_register = MIPI_ATE_STATUS(1),
 };
 
@@ -781,12 +781,11 @@ static struct mipi_dsi_driver chipone_dsi_driver = {
 	.remove = chipone_dsi_remove,
 	.driver = {
 		.name = "chipone-icn6211",
-		.owner = THIS_MODULE,
 		.of_match_table = chipone_of_match,
 	},
 };
 
-static struct i2c_device_id chipone_i2c_id[] = {
+static const struct i2c_device_id chipone_i2c_id[] = {
 	{ "chipone,icn6211" },
 	{},
 };

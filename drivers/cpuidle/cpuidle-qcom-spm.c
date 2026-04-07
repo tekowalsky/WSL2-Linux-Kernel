@@ -48,7 +48,7 @@ static int qcom_cpu_spc(struct spm_driver_data *drv)
 	ret = cpu_suspend(0, qcom_pm_collapse);
 	/*
 	 * ARM common code executes WFI without calling into our driver and
-	 * if the SPM mode is not reset, then we may accidently power down the
+	 * if the SPM mode is not reset, then we may accidentally power down the
 	 * cpu when we intended only to gate the cpu clock.
 	 * Ensure the state is set to standby before returning.
 	 */
@@ -96,23 +96,20 @@ static int spm_cpuidle_register(struct device *cpuidle_dev, int cpu)
 		return -ENODEV;
 
 	saw_node = of_parse_phandle(cpu_node, "qcom,saw", 0);
-	of_node_put(cpu_node);
 	if (!saw_node)
 		return -ENODEV;
 
 	pdev = of_find_device_by_node(saw_node);
 	of_node_put(saw_node);
+	of_node_put(cpu_node);
 	if (!pdev)
 		return -ENODEV;
 
 	data = devm_kzalloc(cpuidle_dev, sizeof(*data), GFP_KERNEL);
-	if (!data) {
-		put_device(&pdev->dev);
+	if (!data)
 		return -ENOMEM;
-	}
 
 	data->spm = dev_get_drvdata(&pdev->dev);
-	put_device(&pdev->dev);
 	if (!data->spm)
 		return -EINVAL;
 

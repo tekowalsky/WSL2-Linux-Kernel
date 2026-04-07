@@ -203,7 +203,7 @@ __naked void stack_write_clobbers_spilled_regs(void)
 
 SEC("sockops")
 __description("indirect variable-offset stack access, unbounded")
-__failure __msg("invalid unbounded variable-offset indirect access to stack R4")
+__failure __msg("invalid unbounded variable-offset write to stack R4")
 __naked void variable_offset_stack_access_unbounded(void)
 {
 	asm volatile ("					\
@@ -236,7 +236,7 @@ l0_%=:	r0 = 0;						\
 
 SEC("lwt_in")
 __description("indirect variable-offset stack access, max out of bound")
-__failure __msg("invalid variable-offset indirect access to stack R2")
+__failure __msg("invalid variable-offset read from stack R2")
 __naked void access_max_out_of_bound(void)
 {
 	asm volatile ("					\
@@ -263,9 +263,38 @@ __naked void access_max_out_of_bound(void)
 	: __clobber_all);
 }
 
+/* Similar to the test above, but this time check the special case of a
+ * zero-sized stack access. We used to have a bug causing crashes for zero-sized
+ * out-of-bounds accesses.
+ */
+SEC("socket")
+__description("indirect variable-offset stack access, zero-sized, max out of bound")
+__failure __msg("invalid variable-offset write to stack R1")
+__naked void zero_sized_access_max_out_of_bound(void)
+{
+	asm volatile ("                      \
+	r0 = 0;                              \
+	/* Fill some stack */                \
+	*(u64*)(r10 - 16) = r0;              \
+	*(u64*)(r10 - 8) = r0;               \
+	/* Get an unknown value */           \
+	r1 = *(u32*)(r1 + 0);                \
+	r1 &= 63;                            \
+	r1 += -16;                           \
+	/* r1 is now anywhere in [-16,48) */ \
+	r1 += r10;                           \
+	r2 = 0;                              \
+	r3 = 0;                              \
+	call %[bpf_probe_read_kernel];       \
+	exit;                                \
+"	:
+	: __imm(bpf_probe_read_kernel)
+	: __clobber_all);
+}
+
 SEC("lwt_in")
 __description("indirect variable-offset stack access, min out of bound")
-__failure __msg("invalid variable-offset indirect access to stack R2")
+__failure __msg("invalid variable-offset read from stack R2")
 __naked void access_min_out_of_bound(void)
 {
 	asm volatile ("					\

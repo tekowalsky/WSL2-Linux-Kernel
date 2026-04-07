@@ -610,6 +610,38 @@ struct atom_firmware_info_v3_4 {
         uint32_t reserved[2];
 };
 
+struct atom_firmware_info_v3_5 {
+  struct atom_common_table_header table_header;
+  uint32_t firmware_revision;
+  uint32_t bootup_clk_reserved[2];
+  uint32_t firmware_capability;             // enum atombios_firmware_capability
+  uint32_t fw_protect_region_size_in_kb;    /* FW allocate a write protect region at top of FB. */
+  uint32_t bios_scratch_reg_startaddr;      // 1st bios scratch register dword address
+  uint32_t bootup_voltage_reserved[2];
+  uint8_t  mem_module_id;
+  uint8_t  coolingsolution_id;              /*0: Air cooling; 1: Liquid cooling ... */
+  uint8_t  hw_blt_mode;                     //0:HW_BLT_DMA_PIO_MODE; 1:HW_BLT_LITE_SDMA_MODE; 2:HW_BLT_PCI_IO_MODE
+  uint8_t  reserved1;
+  uint32_t mc_baseaddr_high;
+  uint32_t mc_baseaddr_low;
+  uint8_t  board_i2c_feature_id;            // enum of atom_board_i2c_feature_id_def
+  uint8_t  board_i2c_feature_gpio_id;       // i2c id find in gpio_lut data table gpio_id
+  uint8_t  board_i2c_feature_slave_addr;
+  uint8_t  ras_rom_i2c_slave_addr;
+  uint32_t bootup_voltage_reserved1;
+  uint32_t zfb_reserved;
+  // if pplib_pptable_id!=0, pplib get powerplay table inside driver instead of from VBIOS
+  uint32_t pplib_pptable_id;
+  uint32_t hw_voltage_reserved[3];
+  uint32_t maco_pwrlimit_mw;                // bomaco mode power limit in unit of m-watt
+  uint32_t usb_pwrlimit_mw;                 // power limit when USB is enable in unit of m-watt
+  uint32_t fw_reserved_size_in_kb;          // VBIOS reserved extra fw size in unit of kb.
+  uint32_t pspbl_init_reserved[3];
+  uint32_t spi_rom_size;                    // GPU spi rom size
+  uint16_t support_dev_in_objinfo;
+  uint16_t disp_phy_tunning_size;
+  uint32_t reserved[16];
+};
 /* 
   ***************************************************************************
     Data Table lcd_info  structure
@@ -1268,12 +1300,17 @@ struct atom_ext_display_path
 
 //usCaps
 enum ext_display_path_cap_def {
-	EXT_DISPLAY_PATH_CAPS__HBR2_DISABLE =           0x0001,
-	EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN =         0x0002,
-	EXT_DISPLAY_PATH_CAPS__EXT_CHIP_MASK =          0x007C,
-	EXT_DISPLAY_PATH_CAPS__HDMI20_PI3EQX1204 =      (0x01 << 2), //PI redriver chip
-	EXT_DISPLAY_PATH_CAPS__HDMI20_TISN65DP159RSBT = (0x02 << 2), //TI retimer chip
-	EXT_DISPLAY_PATH_CAPS__HDMI20_PARADE_PS175 =    (0x03 << 2)  //Parade DP->HDMI recoverter chip
+  EXT_DISPLAY_PATH_CAPS__EXT_CHIP_MASK =		0x007E,
+  AMD_EXT_DISPLAY_PATH_CAPS__EXT_CHIP_MASK =		0x007E,
+  AMD_EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN =		(0x01 << 1),
+  AMD_EXT_DISPLAY_PATH_CAPS__HDMI20_PI3EQX1204 =	(0x02 << 1),
+  AMD_EXT_DISPLAY_PATH_CAPS__DP_EARLY_8B10B_TPS2 =	(0x03 << 1),
+  AMD_EXT_DISPLAY_PATH_CAPS__HDMI20_TISN65DP159RSBT =	(0x04 << 1),
+  AMD_EXT_DISPLAY_PATH_CAPS__HDMI20_PARADE_PS175 =	(0x06 << 1),
+  EXT_DISPLAY_PATH_CAPS__DP_FIXED_VS_EN =		(0x07 << 1),
+  EXT_DISPLAY_PATH_CAPS__HDMI20_PI3EQX1204 =		(0x08 << 1),   //PI redriver chip
+  EXT_DISPLAY_PATH_CAPS__HDMI20_TISN65DP159RSBT =	(0x09 << 1),   //TI retimer chip
+  EXT_DISPLAY_PATH_CAPS__AMD_INTERNAL =		(0x0a << 1),   //AMD internal customer chip placeholder
 };
 
 struct atom_external_display_connection_info

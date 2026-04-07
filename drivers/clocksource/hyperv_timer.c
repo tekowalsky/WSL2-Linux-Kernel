@@ -23,7 +23,7 @@
 #include <linux/acpi.h>
 #include <linux/hyperv.h>
 #include <clocksource/hyperv_timer.h>
-#include <asm/hyperv-tlfs.h>
+#include <hyperv/hvhdk.h>
 #include <asm/mshyperv.h>
 
 static struct clock_event_device __percpu *hv_clock_event;
@@ -138,7 +138,21 @@ static int hv_stimer_init(unsigned int cpu)
 	ce->name = "Hyper-V clockevent";
 	ce->features = CLOCK_EVT_FEAT_ONESHOT;
 	ce->cpumask = cpumask_of(cpu);
-	ce->rating = 1000;
+
+	/*
+	 * Lower the rating of the Hyper-V timer in a TDX VM without paravisor,
+	 * so the local APIC timer (lapic_clockevent) is the default timer in
+	 * such a VM. The Hyper-V timer is not preferred in such a VM because
+	 * it depends on the slow VM Reference Counter MSR (the Hyper-V TSC
+	 * page is not enbled in such a VM because the VM uses Invariant TSC
+	 * as a better clocksource and it's challenging to mark the Hyper-V
+	 * TSC page shared in very early boot).
+	 */
+	if (!ms_hyperv.paravisor_present && hv_isolation_type_tdx())
+		ce->rating = 90;
+	else
+		ce->rating = 1000;
+
 	ce->set_state_shutdown = hv_ce_shutdown;
 	ce->set_state_oneshot = hv_ce_set_oneshot;
 	ce->set_next_event = hv_ce_set_next_event;
@@ -373,15 +387,11 @@ static __always_inline u64 read_hv_clock_msr(void)
 	 * is set to 0 when the partition is created and is incremented in 100
 	 * nanosecond units.
 	 *
-	 * Use hv_raw_get_msr() on x86 because this function is used from noinstr
-	 * on x86. Notable; while HV_MSR_TIME_REF_COUNT is a synthetic register
-	 * it doesn't need the GHCB path.
+	 * Use hv_raw_get_msr() because this function is used from
+	 * noinstr. Notable; while HV_MSR_TIME_REF_COUNT is a synthetic
+	 * register it doesn't need the GHCB path.
 	 */
-#ifdef CONFIG_ARM64
-	return hv_get_msr(HV_MSR_TIME_REF_COUNT);
-#else
 	return hv_raw_get_msr(HV_MSR_TIME_REF_COUNT);
-#endif
 }
 
 /*
@@ -395,12 +405,7 @@ static __always_inline u64 read_hv_clock_msr(void)
 static union {
 	struct ms_hyperv_tsc_page page;
 	u8 reserved[PAGE_SIZE];
-} tsc_pg
-#ifdef CONFIG_ARM64
-    __aligned(PAGE_SIZE);
-#else
-    __bss_decrypted __aligned(PAGE_SIZE);
-#endif
+} tsc_pg __bss_decrypted __aligned(PAGE_SIZE);
 
 static struct ms_hyperv_tsc_page *tsc_page = &tsc_pg.page;
 static unsigned long tsc_pfn;
@@ -633,17 +638,3 @@ void __init hv_remap_tsc_clocksource(void)
 	if (!tsc_page)
 		pr_err("Failed to remap Hyper-V TSC page.\n");
 }
-
-/* Initialize everything on ARM64 */
-static int __init hyperv_timer_init(struct acpi_table_header *table)
-{
-	if (!hv_is_hyperv_initialized())
-		return -EINVAL;
-
-	hv_init_clocksource();
-	if (hv_stimer_alloc(true))
-		return -EINVAL;
-
-	return 0;
-}
-TIMER_ACPI_DECLARE(hyperv, ACPI_SIG_GTDT, hyperv_timer_init);

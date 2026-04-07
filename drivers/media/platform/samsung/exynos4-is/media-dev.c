@@ -1410,14 +1410,12 @@ static int subdev_notifier_complete(struct v4l2_async_notifier *notifier)
 	mutex_lock(&fmd->media_dev.graph_mutex);
 
 	ret = fimc_md_create_links(fmd);
-	if (ret < 0) {
-		mutex_unlock(&fmd->media_dev.graph_mutex);
-		return ret;
-	}
-
-	mutex_unlock(&fmd->media_dev.graph_mutex);
+	if (ret < 0)
+		goto unlock;
 
 	ret = v4l2_device_register_subdev_nodes(&fmd->v4l2_dev);
+unlock:
+	mutex_unlock(&fmd->media_dev.graph_mutex);
 	if (ret < 0)
 		return ret;
 
@@ -1566,7 +1564,7 @@ MODULE_DEVICE_TABLE(of, fimc_md_of_match);
 
 static struct platform_driver fimc_md_driver = {
 	.probe		= fimc_md_probe,
-	.remove_new	= fimc_md_remove,
+	.remove		= fimc_md_remove,
 	.driver = {
 		.of_match_table = of_match_ptr(fimc_md_of_match),
 		.name		= "s5p-fimc-md",

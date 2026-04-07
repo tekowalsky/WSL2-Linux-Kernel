@@ -16,7 +16,6 @@ static struct cached_fid *init_cached_dir(const char *path);
 static void free_cached_dir(struct cached_fid *cfid);
 static void smb2_close_cached_fid(struct kref *ref);
 static void cfids_laundromat_worker(struct work_struct *work);
-static void close_cached_dir_locked(struct cached_fid *cfid);
 
 struct cached_dir_dentry {
 	struct list_head entry;
@@ -30,6 +29,7 @@ static struct cached_fid *find_or_create_cached_dir(struct cached_fids *cfids,
 {
 	struct cached_fid *cfid;
 
+	spin_lock(&cfids->cfid_list_lock);
 	list_for_each_entry(cfid, &cfids->entries, entry) {
 		if (!strcmp(cfid->path, path)) {
 			/*
@@ -38,20 +38,25 @@ static struct cached_fid *find_or_create_cached_dir(struct cached_fids *cfids,
 			 * being deleted due to a lease break.
 			 */
 			if (!cfid->time || !cfid->has_lease) {
+				spin_unlock(&cfids->cfid_list_lock);
 				return NULL;
 			}
 			kref_get(&cfid->refcount);
+			spin_unlock(&cfids->cfid_list_lock);
 			return cfid;
 		}
 	}
 	if (lookup_only) {
+		spin_unlock(&cfids->cfid_list_lock);
 		return NULL;
 	}
 	if (cfids->num_entries >= max_cached_dirs) {
+		spin_unlock(&cfids->cfid_list_lock);
 		return NULL;
 	}
 	cfid = init_cached_dir(path);
 	if (cfid == NULL) {
+		spin_unlock(&cfids->cfid_list_lock);
 		return NULL;
 	}
 	cfid->cfids = cfids;
@@ -69,6 +74,7 @@ static struct cached_fid *find_or_create_cached_dir(struct cached_fids *cfids,
 	 */
 	cfid->has_lease = true;
 
+	spin_unlock(&cfids->cfid_list_lock);
 	return cfid;
 }
 
@@ -156,15 +162,17 @@ int open_cached_dir(unsigned int xid, struct cifs_tcon *tcon,
 	const char *npath;
 	int retries = 0, cur_sleep = 1;
 
-	if (tcon == NULL || tcon->cfids == NULL || tcon->nohandlecache ||
-	    is_smb1_server(tcon->ses->server) || (dir_cache_timeout == 0))
+	if (cifs_sb->root == NULL)
+		return -ENOENT;
+
+	if (tcon == NULL)
 		return -EOPNOTSUPP;
 
 	ses = tcon->ses;
 	cfids = tcon->cfids;
 
-	if (cifs_sb->root == NULL)
-		return -ENOENT;
+	if (cfids == NULL)
+		return -EOPNOTSUPP;
 
 replay_again:
 	/* reinitialize for possible replay */
@@ -179,10 +187,8 @@ replay_again:
 	if (!utf16_path)
 		return -ENOMEM;
 
-	spin_lock(&cfids->cfid_list_lock);
 	cfid = find_or_create_cached_dir(cfids, path, lookup_only, tcon->max_cached_dirs);
 	if (cfid == NULL) {
-		spin_unlock(&cfids->cfid_list_lock);
 		kfree(utf16_path);
 		return -ENOENT;
 	}
@@ -191,6 +197,7 @@ replay_again:
 	 * Otherwise, it is either a new entry or laundromat worker removed it
 	 * from @cfids->entries.  Caller will put last reference if the latter.
 	 */
+	spin_lock(&cfids->cfid_list_lock);
 	if (cfid->has_lease && cfid->time) {
 		spin_unlock(&cfids->cfid_list_lock);
 		*ret_cfid = cfid;
@@ -363,11 +370,11 @@ out:
 			 * lease. Release one here, and the second below.
 			 */
 			cfid->has_lease = false;
-			close_cached_dir_locked(cfid);
+			kref_put(&cfid->refcount, smb2_close_cached_fid);
 		}
 		spin_unlock(&cfids->cfid_list_lock);
 
-		close_cached_dir(cfid);
+		kref_put(&cfid->refcount, smb2_close_cached_fid);
 	} else {
 		*ret_cfid = cfid;
 		atomic_inc(&tcon->num_remote_opens);
@@ -389,7 +396,7 @@ int open_cached_dir_by_dentry(struct cifs_tcon *tcon,
 	struct cached_fids *cfids = tcon->cfids;
 
 	if (cfids == NULL)
-		return -ENOENT;
+		return -EOPNOTSUPP;
 
 	spin_lock(&cfids->cfid_list_lock);
 	list_for_each_entry(cfid, &cfids->entries, entry) {
@@ -407,14 +414,12 @@ int open_cached_dir_by_dentry(struct cifs_tcon *tcon,
 
 static void
 smb2_close_cached_fid(struct kref *ref)
-__releases(&cfid->cfids->cfid_list_lock)
 {
 	struct cached_fid *cfid = container_of(ref, struct cached_fid,
 					       refcount);
 	int rc;
 
-	lockdep_assert_held(&cfid->cfids->cfid_list_lock);
-
+	spin_lock(&cfid->cfids->cfid_list_lock);
 	if (cfid->on_list) {
 		list_del(&cfid->entry);
 		cfid->on_list = false;
@@ -449,49 +454,15 @@ void drop_cached_dir_by_name(const unsigned int xid, struct cifs_tcon *tcon,
 	spin_lock(&cfid->cfids->cfid_list_lock);
 	if (cfid->has_lease) {
 		cfid->has_lease = false;
-		close_cached_dir_locked(cfid);
+		kref_put(&cfid->refcount, smb2_close_cached_fid);
 	}
 	spin_unlock(&cfid->cfids->cfid_list_lock);
 	close_cached_dir(cfid);
 }
 
-/**
- * close_cached_dir - drop a reference of a cached dir
- *
- * The release function will be called with cfid_list_lock held to remove the
- * cached dirs from the list before any other thread can take another @cfid
- * ref. Must not be called with cfid_list_lock held; use
- * close_cached_dir_locked() called instead.
- *
- * @cfid: cached dir
- */
+
 void close_cached_dir(struct cached_fid *cfid)
 {
-	lockdep_assert_not_held(&cfid->cfids->cfid_list_lock);
-	kref_put_lock(&cfid->refcount, smb2_close_cached_fid, &cfid->cfids->cfid_list_lock);
-}
-
-/**
- * close_cached_dir_locked - put a reference of a cached dir with
- * cfid_list_lock held
- *
- * Calling close_cached_dir() with cfid_list_lock held has the potential effect
- * of causing a deadlock if the invariant of refcount >= 2 is false.
- *
- * This function is used in paths that hold cfid_list_lock and expect at least
- * two references. If that invariant is violated, WARNs and returns without
- * dropping a reference; the final put must still go through
- * close_cached_dir().
- *
- * @cfid: cached dir
- */
-static void close_cached_dir_locked(struct cached_fid *cfid)
-{
-	lockdep_assert_held(&cfid->cfids->cfid_list_lock);
-
-	if (WARN_ON(kref_read(&cfid->refcount) < 2))
-		return;
-
 	kref_put(&cfid->refcount, smb2_close_cached_fid);
 }
 
@@ -521,17 +492,8 @@ void close_all_cached_dirs(struct cifs_sb_info *cifs_sb)
 		spin_lock(&cfids->cfid_list_lock);
 		list_for_each_entry(cfid, &cfids->entries, entry) {
 			tmp_list = kmalloc(sizeof(*tmp_list), GFP_ATOMIC);
-			if (tmp_list == NULL) {
-				/*
-				 * If the malloc() fails, we won't drop all
-				 * dentries, and unmounting is likely to trigger
-				 * a 'Dentry still in use' error.
-				 */
-				cifs_tcon_dbg(VFS, "Out of memory while dropping dentries\n");
-				spin_unlock(&cfids->cfid_list_lock);
-				spin_unlock(&cifs_sb->tlink_tree_lock);
-				goto done;
-			}
+			if (tmp_list == NULL)
+				break;
 			spin_lock(&cfid->fid_lock);
 			tmp_list->dentry = cfid->dentry;
 			cfid->dentry = NULL;
@@ -543,7 +505,6 @@ void close_all_cached_dirs(struct cifs_sb_info *cifs_sb)
 	}
 	spin_unlock(&cifs_sb->tlink_tree_lock);
 
-done:
 	list_for_each_entry_safe(tmp_list, q, &entry, entry) {
 		list_del(&tmp_list->entry);
 		dput(tmp_list->dentry);
@@ -603,7 +564,7 @@ cached_dir_offload_close(struct work_struct *work)
 
 	WARN_ON(cfid->on_list);
 
-	close_cached_dir(cfid);
+	kref_put(&cfid->refcount, smb2_close_cached_fid);
 	cifs_put_tcon(tcon, netfs_trace_tcon_ref_put_cached_close);
 }
 
@@ -727,7 +688,7 @@ static void cfids_invalidation_worker(struct work_struct *work)
 	list_for_each_entry_safe(cfid, q, &entry, entry) {
 		list_del(&cfid->entry);
 		/* Drop the ref-count acquired in invalidate_all_cached_dirs */
-		close_cached_dir(cfid);
+		kref_put(&cfid->refcount, smb2_close_cached_fid);
 	}
 }
 
@@ -780,7 +741,7 @@ static void cfids_laundromat_worker(struct work_struct *work)
 			 * Drop the ref-count from above, either the lease-ref (if there
 			 * was one) or the extra one acquired.
 			 */
-			close_cached_dir(cfid);
+			kref_put(&cfid->refcount, smb2_close_cached_fid);
 	}
 	queue_delayed_work(cfid_put_wq, &cfids->laundromat_work,
 			   dir_cache_timeout * HZ);

@@ -2,6 +2,7 @@
 /*
  * n_gsm.c GSM 0710 tty multiplexor
  * Copyright (c) 2009/10 Intel Corporation
+ * Copyright (c) 2022/23 Siemens Mobility GmbH
  *
  *	* THIS IS A DEVELOPMENT SNAPSHOT IT IS NOT A FINAL RELEASE *
  *
@@ -123,8 +124,8 @@ struct gsm_msg {
 	u8 addr;		/* DLCI address + flags */
 	u8 ctrl;		/* Control byte + flags */
 	unsigned int len;	/* Length of data block (can be zero) */
-	unsigned char *data;	/* Points into buffer but not at the start */
-	unsigned char buffer[];
+	u8 *data;	/* Points into buffer but not at the start */
+	u8 buffer[];
 };
 
 enum gsm_dlci_state {
@@ -284,7 +285,7 @@ struct gsm_mux {
 	/* Bits for GSM mode decoding */
 
 	/* Framing Layer */
-	unsigned char *buf;
+	u8 *buf;
 	enum gsm_mux_state state;
 	unsigned int len;
 	unsigned int address;
@@ -460,7 +461,6 @@ static int gsm_send_packet(struct gsm_mux *gsm, struct gsm_msg *msg);
 static struct gsm_dlci *gsm_dlci_alloc(struct gsm_mux *gsm, int addr);
 static void gsmld_write_trigger(struct gsm_mux *gsm);
 static void gsmld_write_task(struct work_struct *work);
-static int gsm_modem_send_initial_msc(struct gsm_dlci *dlci);
 
 /**
  *	gsm_fcs_add	-	update FCS
@@ -2174,7 +2174,7 @@ static void gsm_dlci_open(struct gsm_dlci *dlci)
 		pr_debug("DLCI %d goes open.\n", dlci->addr);
 	/* Send current modem state */
 	if (dlci->addr) {
-		gsm_modem_send_initial_msc(dlci);
+		gsm_modem_update(dlci, 0);
 	} else {
 		/* Start keep-alive control */
 		gsm->ka_num = 0;
@@ -2224,7 +2224,7 @@ static int gsm_dlci_negotiate(struct gsm_dlci *dlci)
  *
  *	Some control dlci can stay in ADM mode with other dlci working just
  *	fine. In that case we can just keep the control dlci open after the
- *	DLCI_OPENING retries time out.
+ *	DLCI_OPENING receives DM.
  */
 
 static void gsm_dlci_t1(struct timer_list *t)
@@ -2243,16 +2243,19 @@ static void gsm_dlci_t1(struct timer_list *t)
 		}
 		break;
 	case DLCI_OPENING:
-		if (dlci->retries) {
-			dlci->retries--;
-			gsm_command(dlci->gsm, dlci->addr, SABM|PF);
-			mod_timer(&dlci->t1, jiffies + gsm->t1 * HZ / 100);
-		} else if (!dlci->addr && gsm->control == (DM | PF)) {
+		if (!dlci->addr && gsm->control == (DM | PF)) {
 			if (debug & DBG_ERRORS)
-				pr_info("DLCI %d opening in ADM mode.\n",
-					dlci->addr);
+				pr_info("DLCI 0 opening in ADM mode.\n");
 			dlci->mode = DLCI_MODE_ADM;
 			gsm_dlci_open(dlci);
+		} else if (dlci->retries) {
+			if (!dlci->addr || !gsm->dlci[0] ||
+			    gsm->dlci[0]->state != DLCI_OPENING) {
+				dlci->retries--;
+				gsm_command(dlci->gsm, dlci->addr, SABM|PF);
+			}
+
+			mod_timer(&dlci->t1, jiffies + gsm->t1 * HZ / 100);
 		} else {
 			gsm->open_error++;
 			gsm_dlci_begin_close(dlci); /* prevent half open link */
@@ -2308,7 +2311,9 @@ static void gsm_dlci_begin_open(struct gsm_dlci *dlci)
 		dlci->retries = gsm->n2;
 		if (!need_pn) {
 			dlci->state = DLCI_OPENING;
-			gsm_command(gsm, dlci->addr, SABM|PF);
+			if (!dlci->addr || !gsm->dlci[0] ||
+			    gsm->dlci[0]->state != DLCI_OPENING)
+				gsm_command(gsm, dlci->addr, SABM|PF);
 		} else {
 			/* Configure DLCI before setup */
 			dlci->state = DLCI_CONFIGURE;
@@ -2882,7 +2887,7 @@ static void gsm0_receive_state_check_and_fix(struct gsm_mux *gsm)
  *	Receive bytes in gsm mode 0
  */
 
-static void gsm0_receive(struct gsm_mux *gsm, unsigned char c)
+static void gsm0_receive(struct gsm_mux *gsm, u8 c)
 {
 	unsigned int len;
 
@@ -3000,7 +3005,7 @@ static void gsm1_receive_state_check_and_fix(struct gsm_mux *gsm)
  *	Receive bytes in mode 1 (Advanced option)
  */
 
-static void gsm1_receive(struct gsm_mux *gsm, unsigned char c)
+static void gsm1_receive(struct gsm_mux *gsm, u8 c)
 {
 	gsm1_receive_state_check_and_fix(gsm);
 	/* handle XON/XOFF */
@@ -3597,7 +3602,7 @@ static void gsmld_receive_buf(struct tty_struct *tty, const u8 *cp,
 			      const u8 *fp, size_t count)
 {
 	struct gsm_mux *gsm = tty->disc_data;
-	char flags = TTY_NORMAL;
+	u8 flags = TTY_NORMAL;
 
 	if (debug & DBG_DATA)
 		gsm_hex_dump_bytes(__func__, cp, count);
@@ -3767,7 +3772,7 @@ static ssize_t gsmld_write(struct tty_struct *tty, struct file *file,
 {
 	struct gsm_mux *gsm = tty->disc_data;
 	unsigned long flags;
-	int space;
+	size_t space;
 	int ret;
 
 	if (!gsm)
@@ -3965,8 +3970,7 @@ static void gsm_mux_net_tx_timeout(struct net_device *net, unsigned int txqueue)
 	net->stats.tx_errors++;
 }
 
-static void gsm_mux_rx_netchar(struct gsm_dlci *dlci,
-				const unsigned char *in_buf, int size)
+static void gsm_mux_rx_netchar(struct gsm_dlci *dlci, const u8 *in_buf, int size)
 {
 	struct net_device *net = dlci->net;
 	struct sk_buff *skb;
@@ -4067,7 +4071,7 @@ static int gsm_create_network(struct gsm_dlci *dlci, struct gsm_netconfig *nc)
 	mux_net = netdev_priv(net);
 	mux_net->dlci = dlci;
 	kref_init(&mux_net->ref);
-	strncpy(nc->if_name, net->name, IFNAMSIZ); /* return net name */
+	strscpy(nc->if_name, net->name); /* return net name */
 
 	/* reconfigure dlci for network */
 	dlci->prev_adaption = dlci->adaption;
@@ -4155,28 +4159,6 @@ static int gsm_modem_upd_via_msc(struct gsm_dlci *dlci, u8 brk)
 	if (ctrl == NULL)
 		return -ENOMEM;
 	return gsm_control_wait(dlci->gsm, ctrl);
-}
-
-/**
- * gsm_modem_send_initial_msc - Send initial modem status message
- *
- * @dlci channel
- *
- * Send an initial MSC message after DLCI open to set the initial
- * modem status lines. This is only done for basic mode.
- * Does not wait for a response as we cannot block the input queue
- * processing.
- */
-static int gsm_modem_send_initial_msc(struct gsm_dlci *dlci)
-{
-	u8 modembits[2];
-
-	if (dlci->adaption != 1 || dlci->gsm->encoding != GSM_BASIC_OPT)
-		return 0;
-
-	modembits[0] = (dlci->addr << 2) | 2 | EA; /* DLCI, Valid, EA */
-	modembits[1] = (gsm_encode_modem(dlci) << 1) | EA;
-	return gsm_control_command(dlci->gsm, CMD_MSC, (const u8 *)&modembits, 2);
 }
 
 /**
@@ -4274,7 +4256,7 @@ static const struct tty_port_operations gsm_port_ops = {
 static int gsmtty_install(struct tty_driver *driver, struct tty_struct *tty)
 {
 	struct gsm_mux *gsm;
-	struct gsm_dlci *dlci;
+	struct gsm_dlci *dlci, *dlci0;
 	unsigned int line = tty->index;
 	unsigned int mux = mux_line_to_num(line);
 	bool alloc = false;
@@ -4297,10 +4279,20 @@ static int gsmtty_install(struct tty_driver *driver, struct tty_struct *tty)
 	perspective as we don't have to worry about this
 	if DLCI0 is lost */
 	mutex_lock(&gsm->mutex);
-	if (gsm->dlci[0] && gsm->dlci[0]->state != DLCI_OPEN) {
+
+	dlci0 = gsm->dlci[0];
+	if (dlci0 && dlci0->state != DLCI_OPEN) {
 		mutex_unlock(&gsm->mutex);
-		return -EL2NSYNC;
+
+		if (dlci0->state == DLCI_OPENING)
+			wait_event(gsm->event, dlci0->state != DLCI_OPENING);
+
+		if (dlci0->state != DLCI_OPEN)
+			return -EL2NSYNC;
+
+		mutex_lock(&gsm->mutex);
 	}
+
 	dlci = gsm->dlci[line];
 	if (dlci == NULL) {
 		alloc = true;
@@ -4659,5 +4651,6 @@ module_init(gsm_init);
 module_exit(gsm_exit);
 
 
+MODULE_DESCRIPTION("GSM 0710 tty multiplexor");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS_LDISC(N_GSM0710);

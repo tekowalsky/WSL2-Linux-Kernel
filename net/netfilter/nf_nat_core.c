@@ -248,7 +248,7 @@ static noinline bool
 nf_nat_used_tuple_new(const struct nf_conntrack_tuple *tuple,
 		      const struct nf_conn *ignored_ct)
 {
-	static const unsigned long uses_nat = IPS_NAT_MASK | IPS_SEQ_ADJUST;
+	static const unsigned long uses_nat = IPS_NAT_MASK | IPS_SEQ_ADJUST_BIT;
 	const struct nf_conntrack_tuple_hash *thash;
 	const struct nf_conntrack_zone *zone;
 	struct nf_conn *ct;
@@ -287,14 +287,8 @@ nf_nat_used_tuple_new(const struct nf_conntrack_tuple *tuple,
 	zone = nf_ct_zone(ignored_ct);
 
 	thash = nf_conntrack_find_get(net, zone, tuple);
-	if (unlikely(!thash)) {
-		struct nf_conntrack_tuple reply;
-
-		nf_ct_invert_tuple(&reply, tuple);
-		thash = nf_conntrack_find_get(net, zone, &reply);
-		if (!thash) /* clashing entry went away */
-			return false;
-	}
+	if (unlikely(!thash)) /* clashing entry went away */
+		return false;
 
 	ct = nf_ct_tuplehash_to_ctrack(thash);
 
@@ -673,8 +667,11 @@ static void nf_nat_l4proto_unique_tuple(struct nf_conntrack_tuple *tuple,
 find_free_id:
 	if (range->flags & NF_NAT_RANGE_PROTO_OFFSET)
 		off = (ntohs(*keyptr) - ntohs(range->base_proto.all));
-	else
+	else if ((range->flags & NF_NAT_RANGE_PROTO_RANDOM_ALL) ||
+		 maniptype != NF_NAT_MANIP_DST)
 		off = get_random_u16();
+	else
+		off = 0;
 
 	attempts = range_size;
 	if (attempts > NF_NAT_MAX_ATTEMPTS)
@@ -1093,10 +1090,8 @@ static int nf_nat_ipv4_nlattr_to_range(struct nlattr *tb[],
 		range->flags |= NF_NAT_RANGE_MAP_IPS;
 	}
 
-	if (tb[CTA_NAT_V4_MAXIP])
-		range->max_addr.ip = nla_get_be32(tb[CTA_NAT_V4_MAXIP]);
-	else
-		range->max_addr.ip = range->min_addr.ip;
+	range->max_addr.ip = nla_get_be32_default(tb[CTA_NAT_V4_MAXIP],
+						  range->min_addr.ip);
 
 	return 0;
 }
@@ -1223,7 +1218,7 @@ int nf_nat_register_fn(struct net *net, u8 pf, const struct nf_hook_ops *ops,
 	if (!nat_proto_net->nat_hook_ops) {
 		WARN_ON(nat_proto_net->users != 0);
 
-		nat_ops = kmemdup(orig_nat_ops, sizeof(*orig_nat_ops) * ops_count, GFP_KERNEL);
+		nat_ops = kmemdup_array(orig_nat_ops, ops_count, sizeof(*orig_nat_ops), GFP_KERNEL);
 		if (!nat_ops) {
 			mutex_unlock(&nf_nat_proto_mutex);
 			return -ENOMEM;
@@ -1327,7 +1322,6 @@ static const struct nf_nat_hook nat_hook = {
 #ifdef CONFIG_XFRM
 	.decode_session		= __nf_nat_decode_session,
 #endif
-	.manip_pkt		= nf_nat_manip_pkt,
 	.remove_nat_bysrc	= nf_nat_cleanup_conntrack,
 };
 
@@ -1385,6 +1379,7 @@ static void __exit nf_nat_cleanup(void)
 }
 
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Network address translation core");
 
 module_init(nf_nat_init);
 module_exit(nf_nat_cleanup);

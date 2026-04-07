@@ -11,7 +11,8 @@
 #include <linux/ratelimit.h>
 #include <linux/error-injection.h>
 #include <linux/sched/mm.h>
-#include "ctree.h"
+#include <linux/string_choices.h>
+#include "extent-tree.h"
 #include "fs.h"
 #include "messages.h"
 #include "misc.h"
@@ -19,9 +20,7 @@
 #include "transaction.h"
 #include "disk-io.h"
 #include "extent_io.h"
-#include "volumes.h"
 #include "space-info.h"
-#include "delalloc-space.h"
 #include "block-group.h"
 #include "discard.h"
 #include "subpage.h"
@@ -57,6 +56,11 @@ static void bitmap_clear_bits(struct btrfs_free_space_ctl *ctl,
 			      struct btrfs_free_space *info, u64 offset,
 			      u64 bytes, bool update_stats);
 
+static void btrfs_crc32c_final(u32 crc, u8 *result)
+{
+	put_unaligned_le32(~crc, result);
+}
+
 static void __btrfs_remove_free_space_cache(struct btrfs_free_space_ctl *ctl)
 {
 	struct btrfs_free_space *info;
@@ -79,7 +83,6 @@ static struct inode *__lookup_free_space_inode(struct btrfs_root *root,
 					       struct btrfs_path *path,
 					       u64 offset)
 {
-	struct btrfs_fs_info *fs_info = root->fs_info;
 	struct btrfs_key key;
 	struct btrfs_key location;
 	struct btrfs_disk_key disk_key;
@@ -113,7 +116,7 @@ static struct inode *__lookup_free_space_inode(struct btrfs_root *root,
 	 * sure NOFS is set to keep us from deadlocking.
 	 */
 	nofs_flag = memalloc_nofs_save();
-	inode = btrfs_iget_path(fs_info->sb, location.objectid, root, path);
+	inode = btrfs_iget_path(location.objectid, root, path);
 	btrfs_release_path(path);
 	memalloc_nofs_restore(nofs_flag);
 	if (IS_ERR(inode))
@@ -135,7 +138,7 @@ struct inode *lookup_free_space_inode(struct btrfs_block_group *block_group,
 
 	spin_lock(&block_group->lock);
 	if (block_group->inode)
-		inode = igrab(block_group->inode);
+		inode = igrab(&block_group->inode->vfs_inode);
 	spin_unlock(&block_group->lock);
 	if (inode)
 		return inode;
@@ -154,7 +157,7 @@ struct inode *lookup_free_space_inode(struct btrfs_block_group *block_group,
 	}
 
 	if (!test_and_set_bit(BLOCK_GROUP_FLAG_IREF, &block_group->runtime_flags))
-		block_group->inode = igrab(inode);
+		block_group->inode = BTRFS_I(igrab(inode));
 	spin_unlock(&block_group->lock);
 
 	return inode;
@@ -195,7 +198,6 @@ static int __create_free_space_inode(struct btrfs_root *root,
 	btrfs_set_inode_nlink(leaf, inode_item, 1);
 	btrfs_set_inode_transid(leaf, inode_item, trans->transid);
 	btrfs_set_inode_block_group(leaf, inode_item, offset);
-	btrfs_mark_buffer_dirty(trans, leaf);
 	btrfs_release_path(path);
 
 	key.objectid = BTRFS_FREE_SPACE_OBJECTID;
@@ -213,7 +215,6 @@ static int __create_free_space_inode(struct btrfs_root *root,
 				struct btrfs_free_space_header);
 	memzero_extent_buffer(leaf, (unsigned long)header, sizeof(*header));
 	btrfs_set_free_space_key(leaf, header, &disk_key);
-	btrfs_mark_buffer_dirty(trans, leaf);
 	btrfs_release_path(path);
 
 	return 0;
@@ -354,7 +355,7 @@ int btrfs_truncate_free_space_cache(struct btrfs_trans_handle *trans,
 	if (ret)
 		goto fail;
 
-	ret = btrfs_update_inode(trans, root, inode);
+	ret = btrfs_update_inode(trans, inode);
 
 fail:
 	if (locked)
@@ -394,7 +395,7 @@ static int io_ctl_init(struct btrfs_io_ctl *io_ctl, struct inode *inode,
 		return -ENOMEM;
 
 	io_ctl->num_pages = num_pages;
-	io_ctl->fs_info = btrfs_sb(inode->i_sb);
+	io_ctl->fs_info = inode_to_fs_info(inode);
 	io_ctl->inode = inode;
 
 	return 0;
@@ -434,8 +435,8 @@ static void io_ctl_drop_pages(struct btrfs_io_ctl *io_ctl)
 
 	for (i = 0; i < io_ctl->num_pages; i++) {
 		if (io_ctl->pages[i]) {
-			btrfs_page_clear_checked(io_ctl->fs_info,
-					io_ctl->pages[i],
+			btrfs_folio_clear_checked(io_ctl->fs_info,
+					page_folio(io_ctl->pages[i]),
 					page_offset(io_ctl->pages[i]),
 					PAGE_SIZE);
 			unlock_page(io_ctl->pages[i]);
@@ -460,7 +461,7 @@ static int io_ctl_prepare_pages(struct btrfs_io_ctl *io_ctl, bool uptodate)
 			return -ENOMEM;
 		}
 
-		ret = set_page_extent_mapped(page);
+		ret = set_folio_extent_mapped(page_folio(page));
 		if (ret < 0) {
 			unlock_page(page);
 			put_page(page);
@@ -540,7 +541,7 @@ static void io_ctl_set_crc(struct btrfs_io_ctl *io_ctl, int index)
 	if (index == 0)
 		offset = sizeof(u32) * io_ctl->num_pages;
 
-	crc = btrfs_crc32c(crc, io_ctl->orig + offset, PAGE_SIZE - offset);
+	crc = crc32c(crc, io_ctl->orig + offset, PAGE_SIZE - offset);
 	btrfs_crc32c_final(crc, (u8 *)&crc);
 	io_ctl_unmap_page(io_ctl);
 	tmp = page_address(io_ctl->pages[0]);
@@ -562,7 +563,7 @@ static int io_ctl_check_crc(struct btrfs_io_ctl *io_ctl, int index)
 	val = *tmp;
 
 	io_ctl_map_page(io_ctl, 0);
-	crc = btrfs_crc32c(crc, io_ctl->orig + offset, PAGE_SIZE - offset);
+	crc = crc32c(crc, io_ctl->orig + offset, PAGE_SIZE - offset);
 	btrfs_crc32c_final(crc, (u8 *)&crc);
 	if (val != crc) {
 		btrfs_err_rl(io_ctl->fs_info,
@@ -1186,7 +1187,6 @@ update_cache_item(struct btrfs_trans_handle *trans,
 	btrfs_set_free_space_entries(leaf, header, entries);
 	btrfs_set_free_space_bitmaps(leaf, header, bitmaps);
 	btrfs_set_free_space_generation(leaf, header, trans->transid);
-	btrfs_mark_buffer_dirty(trans, leaf);
 	btrfs_release_path(path);
 
 	return 0;
@@ -1266,7 +1266,7 @@ static int flush_dirty_cache(struct inode *inode)
 {
 	int ret;
 
-	ret = btrfs_wait_ordered_range(inode, 0, (u64)-1);
+	ret = btrfs_wait_ordered_range(BTRFS_I(inode), 0, (u64)-1);
 	if (ret)
 		clear_extent_bit(&BTRFS_I(inode)->io_tree, 0, inode->i_size - 1,
 				 EXTENT_DELALLOC, NULL);
@@ -1322,7 +1322,7 @@ out:
 	  "failed to write free space cache for block group %llu error %d",
 				  block_group->start, ret);
 	}
-	btrfs_update_inode(trans, root, BTRFS_I(inode));
+	btrfs_update_inode(trans, BTRFS_I(inode));
 
 	if (block_group) {
 		/* the dirty list is protected by the dirty_bgs_lock */
@@ -1363,7 +1363,6 @@ int btrfs_wait_cache_io(struct btrfs_trans_handle *trans,
 /*
  * Write out cached info to an inode.
  *
- * @root:        root the inode belongs to
  * @inode:       freespace inode we are writing out
  * @ctl:         free space cache we are going to write out
  * @block_group: block_group for this cache if it belongs to a block_group
@@ -1374,7 +1373,7 @@ int btrfs_wait_cache_io(struct btrfs_trans_handle *trans,
  * on mount.  This will return 0 if it was successful in writing the cache out,
  * or an errno if it was not.
  */
-static int __btrfs_write_out_cache(struct btrfs_root *root, struct inode *inode,
+static int __btrfs_write_out_cache(struct inode *inode,
 				   struct btrfs_free_space_ctl *ctl,
 				   struct btrfs_block_group *block_group,
 				   struct btrfs_io_ctl *io_ctl,
@@ -1386,6 +1385,7 @@ static int __btrfs_write_out_cache(struct btrfs_root *root, struct inode *inode,
 	int bitmaps = 0;
 	int ret;
 	int must_iput = 0;
+	int i_size;
 
 	if (!i_size_read(inode))
 		return -EIO;
@@ -1456,11 +1456,16 @@ static int __btrfs_write_out_cache(struct btrfs_root *root, struct inode *inode,
 	io_ctl_zero_remaining_pages(io_ctl);
 
 	/* Everything is written out, now we dirty the pages in the file. */
-	ret = btrfs_dirty_pages(BTRFS_I(inode), io_ctl->pages,
-				io_ctl->num_pages, 0, i_size_read(inode),
-				&cached_state, false);
-	if (ret)
-		goto out_nospc;
+	i_size = i_size_read(inode);
+	for (int i = 0; i < round_up(i_size, PAGE_SIZE) / PAGE_SIZE; i++) {
+		u64 dirty_start = i * PAGE_SIZE;
+		u64 dirty_len = min_t(u64, dirty_start + PAGE_SIZE, i_size) - dirty_start;
+
+		ret = btrfs_dirty_folio(BTRFS_I(inode), page_folio(io_ctl->pages[i]),
+					dirty_start, dirty_len, &cached_state, false);
+		if (ret < 0)
+			goto out_nospc;
+	}
 
 	if (block_group && (block_group->flags & BTRFS_BLOCK_GROUP_DATA))
 		up_write(&block_group->data_rwsem);
@@ -1482,7 +1487,7 @@ static int __btrfs_write_out_cache(struct btrfs_root *root, struct inode *inode,
 	io_ctl->entries = entries;
 	io_ctl->bitmaps = bitmaps;
 
-	ret = btrfs_fdatawrite_range(inode, 0, (u64)-1);
+	ret = btrfs_fdatawrite_range(BTRFS_I(inode), 0, (u64)-1);
 	if (ret)
 		goto out;
 
@@ -1507,7 +1512,7 @@ out:
 		invalidate_inode_pages2(inode->i_mapping);
 		BTRFS_I(inode)->generation = 0;
 	}
-	btrfs_update_inode(trans, root, BTRFS_I(inode));
+	btrfs_update_inode(trans, BTRFS_I(inode));
 	if (must_iput)
 		iput(inode);
 	return ret;
@@ -1533,8 +1538,8 @@ int btrfs_write_out_cache(struct btrfs_trans_handle *trans,
 	if (IS_ERR(inode))
 		return 0;
 
-	ret = __btrfs_write_out_cache(fs_info->tree_root, inode, ctl,
-				block_group, &block_group->io_ctl, trans);
+	ret = __btrfs_write_out_cache(inode, ctl, block_group,
+				      &block_group->io_ctl, trans);
 	if (ret) {
 		btrfs_debug(fs_info,
 	  "failed to write free space cache for block group %llu error %d",
@@ -2618,7 +2623,7 @@ static void steal_from_bitmap(struct btrfs_free_space_ctl *ctl,
 	}
 }
 
-int __btrfs_add_free_space(struct btrfs_block_group *block_group,
+static int __btrfs_add_free_space(struct btrfs_block_group *block_group,
 			   u64 offset, u64 bytes,
 			   enum btrfs_trim_state trim_state)
 {
@@ -2935,12 +2940,11 @@ void btrfs_dump_free_space(struct btrfs_block_group *block_group,
 		if (info->bytes >= bytes && !block_group->ro)
 			count++;
 		btrfs_crit(fs_info, "entry offset %llu, bytes %llu, bitmap %s",
-			   info->offset, info->bytes,
-		       (info->bitmap) ? "yes" : "no");
+			   info->offset, info->bytes, str_yes_no(info->bitmap));
 	}
 	spin_unlock(&ctl->tree_lock);
 	btrfs_info(fs_info, "block group has cluster?: %s",
-	       list_empty(&block_group->cluster_list) ? "no" : "yes");
+	       str_no_yes(list_empty(&block_group->cluster_list)));
 	btrfs_info(fs_info,
 		   "%d free space entries at or bigger than %llu bytes",
 		   count, bytes);
@@ -4157,15 +4161,13 @@ out:
 
 int __init btrfs_free_space_init(void)
 {
-	btrfs_free_space_cachep = kmem_cache_create("btrfs_free_space",
-			sizeof(struct btrfs_free_space), 0,
-			SLAB_MEM_SPREAD, NULL);
+	btrfs_free_space_cachep = KMEM_CACHE(btrfs_free_space, 0);
 	if (!btrfs_free_space_cachep)
 		return -ENOMEM;
 
 	btrfs_free_space_bitmap_cachep = kmem_cache_create("btrfs_free_space_bitmap",
 							PAGE_SIZE, PAGE_SIZE,
-							SLAB_MEM_SPREAD, NULL);
+							0, NULL);
 	if (!btrfs_free_space_bitmap_cachep) {
 		kmem_cache_destroy(btrfs_free_space_cachep);
 		return -ENOMEM;

@@ -31,6 +31,7 @@
 #include <linux/seq_file.h>
 #include <linux/jhash.h>
 #include <linux/random.h>
+#include <linux/rcupdate_wait.h>
 
 #include <net/net_namespace.h>
 #include <net/ip_vs.h>
@@ -884,7 +885,7 @@ static void ip_vs_conn_expire(struct timer_list *t)
 			 * conntrack cleanup for the net.
 			 */
 			smp_rmb();
-			if (READ_ONCE(ipvs->enable))
+			if (ipvs->enable)
 				ip_vs_conn_drop_conntrack(cp);
 		}
 
@@ -1045,28 +1046,35 @@ ip_vs_conn_new(const struct ip_vs_conn_param *p, int dest_af,
 #ifdef CONFIG_PROC_FS
 struct ip_vs_iter_state {
 	struct seq_net_private	p;
-	struct hlist_head	*l;
+	unsigned int		bucket;
+	unsigned int		skip_elems;
 };
 
-static void *ip_vs_conn_array(struct seq_file *seq, loff_t pos)
+static void *ip_vs_conn_array(struct ip_vs_iter_state *iter)
 {
 	int idx;
 	struct ip_vs_conn *cp;
-	struct ip_vs_iter_state *iter = seq->private;
 
-	for (idx = 0; idx < ip_vs_conn_tab_size; idx++) {
+	for (idx = iter->bucket; idx < ip_vs_conn_tab_size; idx++) {
+		unsigned int skip = 0;
+
 		hlist_for_each_entry_rcu(cp, &ip_vs_conn_tab[idx], c_list) {
 			/* __ip_vs_conn_get() is not needed by
 			 * ip_vs_conn_seq_show and ip_vs_conn_sync_seq_show
 			 */
-			if (pos-- == 0) {
-				iter->l = &ip_vs_conn_tab[idx];
+			if (skip >= iter->skip_elems) {
+				iter->bucket = idx;
 				return cp;
 			}
+
+			++skip;
 		}
+
+		iter->skip_elems = 0;
 		cond_resched_rcu();
 	}
 
+	iter->bucket = idx;
 	return NULL;
 }
 
@@ -1075,9 +1083,14 @@ static void *ip_vs_conn_seq_start(struct seq_file *seq, loff_t *pos)
 {
 	struct ip_vs_iter_state *iter = seq->private;
 
-	iter->l = NULL;
 	rcu_read_lock();
-	return *pos ? ip_vs_conn_array(seq, *pos - 1) :SEQ_START_TOKEN;
+	if (*pos == 0) {
+		iter->skip_elems = 0;
+		iter->bucket = 0;
+		return SEQ_START_TOKEN;
+	}
+
+	return ip_vs_conn_array(iter);
 }
 
 static void *ip_vs_conn_seq_next(struct seq_file *seq, void *v, loff_t *pos)
@@ -1085,28 +1098,22 @@ static void *ip_vs_conn_seq_next(struct seq_file *seq, void *v, loff_t *pos)
 	struct ip_vs_conn *cp = v;
 	struct ip_vs_iter_state *iter = seq->private;
 	struct hlist_node *e;
-	struct hlist_head *l = iter->l;
-	int idx;
 
 	++*pos;
 	if (v == SEQ_START_TOKEN)
-		return ip_vs_conn_array(seq, 0);
+		return ip_vs_conn_array(iter);
 
 	/* more on same hash chain? */
 	e = rcu_dereference(hlist_next_rcu(&cp->c_list));
-	if (e)
+	if (e) {
+		iter->skip_elems++;
 		return hlist_entry(e, struct ip_vs_conn, c_list);
-
-	idx = l - ip_vs_conn_tab;
-	while (++idx < ip_vs_conn_tab_size) {
-		hlist_for_each_entry_rcu(cp, &ip_vs_conn_tab[idx], c_list) {
-			iter->l = &ip_vs_conn_tab[idx];
-			return cp;
-		}
-		cond_resched_rcu();
 	}
-	iter->l = NULL;
-	return NULL;
+
+	iter->skip_elems = 0;
+	iter->bucket++;
+
+	return ip_vs_conn_array(iter);
 }
 
 static void ip_vs_conn_seq_stop(struct seq_file *seq, void *v)
@@ -1432,7 +1439,7 @@ void ip_vs_expire_nodest_conn_flush(struct netns_ipvs *ipvs)
 		cond_resched_rcu();
 
 		/* netns clean up started, abort delayed work */
-		if (!READ_ONCE(ipvs->enable))
+		if (!ipvs->enable)
 			break;
 	}
 	rcu_read_unlock();
@@ -1510,9 +1517,7 @@ int __init ip_vs_conn_init(void)
 		return -ENOMEM;
 
 	/* Allocate ip_vs_conn slab cache */
-	ip_vs_conn_cachep = kmem_cache_create("ip_vs_conn",
-					      sizeof(struct ip_vs_conn), 0,
-					      SLAB_HWCACHE_ALIGN, NULL);
+	ip_vs_conn_cachep = KMEM_CACHE(ip_vs_conn, SLAB_HWCACHE_ALIGN);
 	if (!ip_vs_conn_cachep) {
 		kvfree(ip_vs_conn_tab);
 		return -ENOMEM;

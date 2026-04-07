@@ -576,10 +576,7 @@ static int rcar_mipi_dsi_startup(struct rcar_mipi_dsi *dsi,
 	udelay(10);
 	rcar_mipi_dsi_clr(dsi, CLOCKSET1, CLOCKSET1_UPDATEPLL);
 
-	rcar_mipi_dsi_clr(dsi, TXSETR, TXSETR_LANECNT_MASK);
-	rcar_mipi_dsi_set(dsi, TXSETR, dsi->lanes - 1);
-
-	ppisetr = ((BIT(dsi->lanes) - 1) & PPISETR_DLEN_MASK) | PPISETR_CLEN;
+	ppisetr = PPISETR_DLEN_3 | PPISETR_CLEN;
 	rcar_mipi_dsi_write(dsi, PPISETR, ppisetr);
 
 	rcar_mipi_dsi_set(dsi, PHYSETUP, PHYSETUP_SHUTDOWNZ);
@@ -1084,6 +1081,8 @@ static const struct rcar_mipi_dsi_device_info v4h_data = {
 static const struct of_device_id rcar_mipi_dsi_of_table[] = {
 	{ .compatible = "renesas,r8a779a0-dsi-csi2-tx", .data = &v3u_data },
 	{ .compatible = "renesas,r8a779g0-dsi-csi2-tx", .data = &v4h_data },
+	/* DSI in r8a779h0 is identical to r8a779g0 */
+	{ .compatible = "renesas,r8a779h0-dsi-csi2-tx", .data = &v4h_data },
 	{ }
 };
 
@@ -1091,7 +1090,7 @@ MODULE_DEVICE_TABLE(of, rcar_mipi_dsi_of_table);
 
 static struct platform_driver rcar_mipi_dsi_platform_driver = {
 	.probe          = rcar_mipi_dsi_probe,
-	.remove_new     = rcar_mipi_dsi_remove,
+	.remove         = rcar_mipi_dsi_remove,
 	.driver         = {
 		.name   = "rcar-mipi-dsi",
 		.of_match_table = rcar_mipi_dsi_of_table,

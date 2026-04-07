@@ -118,7 +118,6 @@ struct bno055_sysfs_attr {
 	int len;
 	int *fusion_vals;
 	int *hw_xlate;
-	int hw_xlate_len;
 	int type;
 };
 
@@ -171,24 +170,20 @@ static int bno055_gyr_scale_vals[] = {
 	1000, 1877467, 2000, 1877467,
 };
 
-static int bno055_gyr_scale_hw_xlate[] = {0, 1, 2, 3, 4};
 static struct bno055_sysfs_attr bno055_gyr_scale = {
 	.vals = bno055_gyr_scale_vals,
 	.len = ARRAY_SIZE(bno055_gyr_scale_vals),
 	.fusion_vals = (int[]){1, 900},
-	.hw_xlate = bno055_gyr_scale_hw_xlate,
-	.hw_xlate_len = ARRAY_SIZE(bno055_gyr_scale_hw_xlate),
+	.hw_xlate = (int[]){4, 3, 2, 1, 0},
 	.type = IIO_VAL_FRACTIONAL,
 };
 
 static int bno055_gyr_lpf_vals[] = {12, 23, 32, 47, 64, 116, 230, 523};
-static int bno055_gyr_lpf_hw_xlate[] = {5, 4, 7, 3, 6, 2, 1, 0};
 static struct bno055_sysfs_attr bno055_gyr_lpf = {
 	.vals = bno055_gyr_lpf_vals,
 	.len = ARRAY_SIZE(bno055_gyr_lpf_vals),
 	.fusion_vals = (int[]){32},
-	.hw_xlate = bno055_gyr_lpf_hw_xlate,
-	.hw_xlate_len = ARRAY_SIZE(bno055_gyr_lpf_hw_xlate),
+	.hw_xlate = (int[]){5, 4, 7, 3, 6, 2, 1, 0},
 	.type = IIO_VAL_INT,
 };
 
@@ -212,7 +207,7 @@ struct bno055_priv {
 	bool sw_reset;
 	struct {
 		__le16 chans[BNO055_SCAN_CH_COUNT];
-		s64 timestamp __aligned(8);
+		aligned_s64 timestamp;
 	} buf;
 	struct dentry *debugfs;
 };
@@ -297,7 +292,7 @@ const struct regmap_config bno055_regmap_config = {
 	.readable_reg = bno055_regmap_readable,
 	.cache_type = REGCACHE_RBTREE,
 };
-EXPORT_SYMBOL_NS_GPL(bno055_regmap_config, IIO_BNO055);
+EXPORT_SYMBOL_NS_GPL(bno055_regmap_config, "IIO_BNO055");
 
 /* must be called in configuration mode */
 static int bno055_calibration_load(struct bno055_priv *priv, const u8 *data, int len)
@@ -566,7 +561,7 @@ static int bno055_get_regmask(struct bno055_priv *priv, int *val, int *val2,
 
 	idx = (hwval & mask) >> shift;
 	if (attr->hw_xlate)
-		for (i = 0; i < attr->hw_xlate_len; i++)
+		for (i = 0; i < attr->len; i++)
 			if (attr->hw_xlate[i] == idx) {
 				idx = i;
 				break;
@@ -1198,7 +1193,7 @@ static ssize_t serialnumber_show(struct device *dev,
 }
 
 static ssize_t calibration_data_read(struct file *filp, struct kobject *kobj,
-				     struct bin_attribute *bin_attr, char *buf,
+				     const struct bin_attribute *bin_attr, char *buf,
 				     loff_t pos, size_t count)
 {
 	struct bno055_priv *priv = iio_priv(dev_to_iio_dev(kobj_to_dev(kobj)));
@@ -1353,16 +1348,16 @@ static struct attribute *bno055_attrs[] = {
 	NULL
 };
 
-static BIN_ATTR_RO(calibration_data, BNO055_CALDATA_LEN);
+static const BIN_ATTR_RO(calibration_data, BNO055_CALDATA_LEN);
 
-static struct bin_attribute *bno055_bin_attrs[] = {
+static const struct bin_attribute *const bno055_bin_attrs[] = {
 	&bin_attr_calibration_data,
 	NULL
 };
 
 static const struct attribute_group bno055_attrs_group = {
 	.attrs = bno055_attrs,
-	.bin_attrs = bno055_bin_attrs,
+	.bin_attrs_new = bno055_bin_attrs,
 };
 
 static const struct iio_info bno055_info = {
@@ -1463,7 +1458,7 @@ static irqreturn_t bno055_trigger_handler(int irq, void *p)
 	 * then we split the transfer, skipping the gap.
 	 */
 	for_each_set_bitrange(start, end, iio_dev->active_scan_mask,
-			      iio_dev->masklength) {
+			      iio_get_masklength(iio_dev)) {
 		/*
 		 * First transfer will start from the beginning of the first
 		 * ones-field in the bitmap
@@ -1683,7 +1678,7 @@ int bno055_probe(struct device *dev, struct regmap *regmap,
 
 	return 0;
 }
-EXPORT_SYMBOL_NS_GPL(bno055_probe, IIO_BNO055);
+EXPORT_SYMBOL_NS_GPL(bno055_probe, "IIO_BNO055");
 
 MODULE_AUTHOR("Andrea Merello <andrea.merello@iit.it>");
 MODULE_DESCRIPTION("Bosch BNO055 driver");

@@ -57,12 +57,9 @@ static inline void bvec_set_page(struct bio_vec *bv, struct page *page,
  * @offset:	offset into the folio
  */
 static inline void bvec_set_folio(struct bio_vec *bv, struct folio *folio,
-		size_t len, size_t offset)
+		unsigned int len, unsigned int offset)
 {
-	unsigned long nr = offset / PAGE_SIZE;
-
-	WARN_ON_ONCE(len > UINT_MAX);
-	bvec_set_page(bv, folio_page(folio, nr), len, offset % PAGE_SIZE);
+	bvec_set_page(bv, &folio->page, len, offset);
 }
 
 /**
@@ -281,6 +278,15 @@ static inline void *bvec_virt(struct bio_vec *bvec)
 {
 	WARN_ON_ONCE(PageHighMem(bvec->bv_page));
 	return page_address(bvec->bv_page) + bvec->bv_offset;
+}
+
+/**
+ * bvec_phys - return the physical address for a bvec
+ * @bvec: bvec to return the physical address for
+ */
+static inline phys_addr_t bvec_phys(const struct bio_vec *bvec)
+{
+	return page_to_phys(bvec->bv_page) + bvec->bv_offset;
 }
 
 #endif /* __LINUX_BVEC_H */

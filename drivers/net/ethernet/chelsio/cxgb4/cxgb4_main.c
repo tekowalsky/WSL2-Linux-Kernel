@@ -2191,18 +2191,6 @@ void cxgb4_get_tcp_stats(struct pci_dev *pdev, struct tp_tcp_stats *v4,
 }
 EXPORT_SYMBOL(cxgb4_get_tcp_stats);
 
-void cxgb4_iscsi_init(struct net_device *dev, unsigned int tag_mask,
-		      const unsigned int *pgsz_order)
-{
-	struct adapter *adap = netdev2adap(dev);
-
-	t4_write_reg(adap, ULP_RX_ISCSI_TAGMASK_A, tag_mask);
-	t4_write_reg(adap, ULP_RX_ISCSI_PSZ_A, HPZ0_V(pgsz_order[0]) |
-		     HPZ1_V(pgsz_order[1]) | HPZ2_V(pgsz_order[2]) |
-		     HPZ3_V(pgsz_order[3]));
-}
-EXPORT_SYMBOL(cxgb4_iscsi_init);
-
 int cxgb4_flush_eq_cache(struct net_device *dev)
 {
 	struct adapter *adap = netdev2adap(dev);
@@ -3183,7 +3171,7 @@ static int cxgb_change_mtu(struct net_device *dev, int new_mtu)
 	ret = t4_set_rxmode(pi->adapter, pi->adapter->mbox, pi->viid,
 			    pi->viid_mirror, new_mtu, -1, -1, -1, -1, true);
 	if (!ret)
-		dev->mtu = new_mtu;
+		WRITE_ONCE(dev->mtu, new_mtu);
 	return ret;
 }
 
@@ -6573,6 +6561,9 @@ out_unlock:
 static void cxgb4_advance_esn_state(struct xfrm_state *x)
 {
 	struct adapter *adap = netdev2adap(x->xso.dev);
+
+	if (x->xso.dir != XFRM_DEV_OFFLOAD_IN)
+		return;
 
 	if (!mutex_trylock(&uld_mutex)) {
 		dev_dbg(adap->pdev_dev,

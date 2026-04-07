@@ -332,7 +332,7 @@ static void ikm_print_header(struct trace_seq *s)
  * ikm_event_handler - callback to handle event events
  *
  * Called any time a rv:"monitor"_event events is generated.
- * It parses and print event.
+ * It parses and prints event.
  */
 static int
 ikm_event_handler(struct trace_seq *s, struct tep_record *record,
@@ -353,7 +353,7 @@ ikm_event_handler(struct trace_seq *s, struct tep_record *record,
 
 	if (config_has_id && (config_my_pid == id))
 		return 0;
-	else if (config_my_pid == pid)
+	else if (config_my_pid && (config_my_pid == pid))
 		return 0;
 
 	tep_print_event(trace_event->tep, s, record, "%16s-%-8d ", TEP_PRINT_COMM, TEP_PRINT_PID);
@@ -384,7 +384,7 @@ ikm_event_handler(struct trace_seq *s, struct tep_record *record,
  * ikm_error_handler - callback to handle error events
  *
  * Called any time a rv:"monitor"_errors events is generated.
- * It parses and print event.
+ * It parses and prints event.
  */
 static int
 ikm_error_handler(struct trace_seq *s, struct tep_record *record,
@@ -595,7 +595,7 @@ static int parse_arguments(char *monitor_name, int argc, char **argv)
 			config_reactor = optarg;
 			break;
 		case 's':
-			config_my_pid = -1;
+			config_my_pid = 0;
 			break;
 		case 't':
 			config_trace = 1;

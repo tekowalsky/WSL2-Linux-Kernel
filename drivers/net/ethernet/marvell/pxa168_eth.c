@@ -1188,7 +1188,7 @@ static int pxa168_eth_change_mtu(struct net_device *dev, int mtu)
 {
 	struct pxa168_eth_private *pep = netdev_priv(dev);
 
-	dev->mtu = mtu;
+	WRITE_ONCE(dev->mtu, mtu);
 	set_port_config_ext(pep);
 
 	if (!netif_running(dev))
@@ -1523,7 +1523,7 @@ err_netdev:
 	return err;
 }
 
-static int pxa168_eth_remove(struct platform_device *pdev)
+static void pxa168_eth_remove(struct platform_device *pdev)
 {
 	struct net_device *dev = platform_get_drvdata(pdev);
 	struct pxa168_eth_private *pep = netdev_priv(dev);
@@ -1541,7 +1541,6 @@ static int pxa168_eth_remove(struct platform_device *pdev)
 	mdiobus_free(pep->smi_bus);
 	unregister_netdev(dev);
 	free_netdev(dev);
-	return 0;
 }
 
 static void pxa168_eth_shutdown(struct platform_device *pdev)

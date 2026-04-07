@@ -388,7 +388,7 @@ struct cdns_i3c_xfer {
 	struct completion comp;
 	int ret;
 	unsigned int ncmds;
-	struct cdns_i3c_cmd cmds[];
+	struct cdns_i3c_cmd cmds[] __counted_by(ncmds);
 };
 
 struct cdns_i3c_data {
@@ -889,8 +889,7 @@ static u32 prepare_rr0_dev_address(u32 addr)
 	ret |= (addr & GENMASK(9, 7)) << 6;
 
 	/* RR0[0] = ~XOR(addr[6:0]) */
-	if (!(hweight8(addr & 0x7f) & 1))
-		ret |= 1;
+	ret |= parity8(addr & 0x7f) ? 0 : BIT(0);
 
 	return ret;
 }
@@ -1562,6 +1561,7 @@ static const struct of_device_id cdns_i3c_master_of_ids[] = {
 	{ .compatible = "cdns,i3c-master", .data = &cdns_i3c_devdata },
 	{ /* sentinel */ },
 };
+MODULE_DEVICE_TABLE(of, cdns_i3c_master_of_ids);
 
 static int cdns_i3c_master_probe(struct platform_device *pdev)
 {
@@ -1675,7 +1675,7 @@ static void cdns_i3c_master_remove(struct platform_device *pdev)
 
 static struct platform_driver cdns_i3c_master = {
 	.probe = cdns_i3c_master_probe,
-	.remove_new = cdns_i3c_master_remove,
+	.remove = cdns_i3c_master_remove,
 	.driver = {
 		.name = "cdns-i3c-master",
 		.of_match_table = cdns_i3c_master_of_ids,

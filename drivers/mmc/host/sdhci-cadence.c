@@ -433,13 +433,6 @@ static const struct sdhci_cdns_drv_data sdhci_elba_drv_data = {
 	},
 };
 
-static const struct sdhci_cdns_drv_data sdhci_eyeq_drv_data = {
-	.pltfm_data = {
-		.ops = &sdhci_cdns_ops,
-		.quirks2 = SDHCI_QUIRK2_PRESET_VALUE_BROKEN,
-	},
-};
-
 static const struct sdhci_cdns_drv_data sdhci_cdns_drv_data = {
 	.pltfm_data = {
 		.ops = &sdhci_cdns_ops,
@@ -602,10 +595,6 @@ static const struct of_device_id sdhci_cdns_match[] = {
 		.compatible = "amd,pensando-elba-sd4hc",
 		.data = &sdhci_elba_drv_data,
 	},
-	{
-		.compatible = "mobileye,eyeq-sd4hc",
-		.data = &sdhci_eyeq_drv_data,
-	},
 	{ .compatible = "cdns,sd4hc" },
 	{ /* sentinel */ }
 };
@@ -619,7 +608,7 @@ static struct platform_driver sdhci_cdns_driver = {
 		.of_match_table = sdhci_cdns_match,
 	},
 	.probe = sdhci_cdns_probe,
-	.remove_new = sdhci_pltfm_remove,
+	.remove = sdhci_pltfm_remove,
 };
 module_platform_driver(sdhci_cdns_driver);
 

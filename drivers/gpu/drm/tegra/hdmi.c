@@ -24,6 +24,8 @@
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_debugfs.h>
+#include <drm/drm_edid.h>
+#include <drm/drm_eld.h>
 #include <drm/drm_file.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_probe_helper.h>
@@ -432,7 +434,7 @@ tegra_hdmi_get_audio_config(unsigned int audio_freq, unsigned int pix_clock,
 
 static void tegra_hdmi_setup_audio_fs_tables(struct tegra_hdmi *hdmi)
 {
-	const unsigned int freqs[] = {
+	static const unsigned int freqs[] = {
 		32000, 44100, 48000, 88200, 96000, 176400, 192000
 	};
 	unsigned int i;
@@ -1116,7 +1118,8 @@ static void tegra_hdmi_early_unregister(struct drm_connector *connector)
 	unsigned int count = ARRAY_SIZE(debugfs_files);
 	struct tegra_hdmi *hdmi = to_hdmi(output);
 
-	drm_debugfs_remove_files(hdmi->debugfs_files, count, minor);
+	drm_debugfs_remove_files(hdmi->debugfs_files, count,
+				 connector->debugfs_entry, minor);
 	kfree(hdmi->debugfs_files);
 	hdmi->debugfs_files = NULL;
 }
@@ -1916,5 +1919,5 @@ struct platform_driver tegra_hdmi_driver = {
 		.of_match_table = tegra_hdmi_of_match,
 	},
 	.probe = tegra_hdmi_probe,
-	.remove_new = tegra_hdmi_remove,
+	.remove = tegra_hdmi_remove,
 };

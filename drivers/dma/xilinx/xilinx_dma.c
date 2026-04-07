@@ -112,7 +112,9 @@
 
 /* Register Direct Mode Registers */
 #define XILINX_DMA_REG_VSIZE			0x0000
+#define XILINX_DMA_VSIZE_MASK			GENMASK(12, 0)
 #define XILINX_DMA_REG_HSIZE			0x0004
+#define XILINX_DMA_HSIZE_MASK			GENMASK(15, 0)
 
 #define XILINX_DMA_REG_FRMDLY_STRIDE		0x0008
 #define XILINX_DMA_FRMDLY_STRIDE_FRMDLY_SHIFT	24
@@ -128,7 +130,6 @@
 #define XILINX_MCDMA_MAX_CHANS_PER_DEVICE	0x20
 #define XILINX_DMA_MAX_CHANS_PER_DEVICE		0x2
 #define XILINX_CDMA_MAX_CHANS_PER_DEVICE	0x1
-#define XILINX_DMA_DFAULT_ADDRWIDTH		0x20
 
 #define XILINX_DMA_DMAXR_ALL_IRQ_MASK	\
 		(XILINX_DMA_DMASR_FRM_CNT_IRQ | \
@@ -1403,16 +1404,18 @@ static void xilinx_vdma_start_transfer(struct xilinx_dma_chan *chan)
 
 	dma_ctrl_write(chan, XILINX_DMA_REG_DMACR, reg);
 
-	j = chan->desc_submitcount;
-	reg = dma_read(chan, XILINX_DMA_REG_PARK_PTR);
-	if (chan->direction == DMA_MEM_TO_DEV) {
-		reg &= ~XILINX_DMA_PARK_PTR_RD_REF_MASK;
-		reg |= j << XILINX_DMA_PARK_PTR_RD_REF_SHIFT;
-	} else {
-		reg &= ~XILINX_DMA_PARK_PTR_WR_REF_MASK;
-		reg |= j << XILINX_DMA_PARK_PTR_WR_REF_SHIFT;
+	if (config->park) {
+		j = chan->desc_submitcount;
+		reg = dma_read(chan, XILINX_DMA_REG_PARK_PTR);
+		if (chan->direction == DMA_MEM_TO_DEV) {
+			reg &= ~XILINX_DMA_PARK_PTR_RD_REF_MASK;
+			reg |= j << XILINX_DMA_PARK_PTR_RD_REF_SHIFT;
+		} else {
+			reg &= ~XILINX_DMA_PARK_PTR_WR_REF_MASK;
+			reg |= j << XILINX_DMA_PARK_PTR_WR_REF_SHIFT;
+		}
+		dma_write(chan, XILINX_DMA_REG_PARK_PTR, reg);
 	}
-	dma_write(chan, XILINX_DMA_REG_PARK_PTR, reg);
 
 	/* Start the hardware */
 	xilinx_dma_start(chan);
@@ -2049,6 +2052,10 @@ xilinx_vdma_dma_prep_interleaved(struct dma_chan *dchan,
 		return NULL;
 
 	if (!xt->numf || !xt->sgl[0].size)
+		return NULL;
+
+	if (xt->numf & ~XILINX_DMA_VSIZE_MASK ||
+	    xt->sgl[0].size & ~XILINX_DMA_HSIZE_MASK)
 		return NULL;
 
 	if (xt->frame_size != 1)
@@ -2901,8 +2908,6 @@ static int xilinx_dma_chan_probe(struct xilinx_dma_device *xdev,
 		return -EINVAL;
 	}
 
-	xdev->common.directions |= chan->direction;
-
 	/* Request the interrupt */
 	chan->irq = of_irq_get(node, chan->tdest);
 	if (chan->irq < 0)
@@ -3058,7 +3063,7 @@ static int xilinx_dma_probe(struct platform_device *pdev)
 	struct device_node *node = pdev->dev.of_node;
 	struct xilinx_dma_device *xdev;
 	struct device_node *child, *np = pdev->dev.of_node;
-	u32 num_frames, addr_width = XILINX_DMA_DFAULT_ADDRWIDTH, len_width;
+	u32 num_frames, addr_width, len_width;
 	int i, err;
 
 	/* Allocate and initialize the DMA engine structure */
@@ -3132,9 +3137,7 @@ static int xilinx_dma_probe(struct platform_device *pdev)
 
 	err = of_property_read_u32(node, "xlnx,addrwidth", &addr_width);
 	if (err < 0)
-		dev_warn(xdev->dev,
-			 "missing xlnx,addrwidth property, using default value %d\n",
-			 XILINX_DMA_DFAULT_ADDRWIDTH);
+		dev_warn(xdev->dev, "missing xlnx,addrwidth property\n");
 
 	if (addr_width > 32)
 		xdev->ext_addr = true;
@@ -3247,10 +3250,8 @@ disable_clks:
 /**
  * xilinx_dma_remove - Driver remove function
  * @pdev: Pointer to the platform_device structure
- *
- * Return: Always '0'
  */
-static int xilinx_dma_remove(struct platform_device *pdev)
+static void xilinx_dma_remove(struct platform_device *pdev)
 {
 	struct xilinx_dma_device *xdev = platform_get_drvdata(pdev);
 	int i;
@@ -3264,8 +3265,6 @@ static int xilinx_dma_remove(struct platform_device *pdev)
 			xilinx_dma_chan_remove(xdev->chan[i]);
 
 	xdma_disable_allclks(xdev);
-
-	return 0;
 }
 
 static struct platform_driver xilinx_vdma_driver = {

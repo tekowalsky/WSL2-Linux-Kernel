@@ -28,9 +28,6 @@ kernel. As of today, modules that make use of symbols exported into namespaces,
 are required to import the namespace. Otherwise the kernel will, depending on
 its configuration, reject loading the module or warn about a missing import.
 
-Additionally, it is possible to put symbols into a module namespace, strictly
-limiting which modules are allowed to use these symbols.
-
 2. How to define Symbol Namespaces
 ==================================
 
@@ -44,12 +41,12 @@ entries.
 In addition to the macros EXPORT_SYMBOL() and EXPORT_SYMBOL_GPL(), that allow
 exporting of kernel symbols to the kernel symbol table, variants of these are
 available to export symbols into a certain namespace: EXPORT_SYMBOL_NS() and
-EXPORT_SYMBOL_NS_GPL(). They take one additional argument: the namespace.
-Please note that due to macro expansion that argument needs to be a
-preprocessor symbol. E.g. to export the symbol ``usb_stor_suspend`` into the
+EXPORT_SYMBOL_NS_GPL(). They take one additional argument: the namespace as a
+string constant. Note that this string must not contain whitespaces.
+E.g. to export the symbol ``usb_stor_suspend`` into the
 namespace ``USB_STORAGE``, use::
 
-	EXPORT_SYMBOL_NS(usb_stor_suspend, USB_STORAGE);
+	EXPORT_SYMBOL_NS(usb_stor_suspend, "USB_STORAGE");
 
 The corresponding ksymtab entry struct ``kernel_symbol`` will have the member
 ``namespace`` set accordingly. A symbol that is exported without a namespace will
@@ -71,7 +68,7 @@ is to define the default namespace in the ``Makefile`` of the subsystem. E.g. to
 export all symbols defined in usb-common into the namespace USB_COMMON, add a
 line like this to drivers/usb/common/Makefile::
 
-	ccflags-y += -DDEFAULT_SYMBOL_NAMESPACE=USB_COMMON
+	ccflags-y += -DDEFAULT_SYMBOL_NAMESPACE='"USB_COMMON"'
 
 That will affect all EXPORT_SYMBOL() and EXPORT_SYMBOL_GPL() statements. A
 symbol exported with EXPORT_SYMBOL_NS() while this definition is present, will
@@ -81,27 +78,10 @@ as this argument has preference over a default symbol namespace.
 A second option to define the default namespace is directly in the compilation
 unit as preprocessor statement. The above example would then read::
 
-	#undef  DEFAULT_SYMBOL_NAMESPACE
-	#define DEFAULT_SYMBOL_NAMESPACE USB_COMMON
+	#define DEFAULT_SYMBOL_NAMESPACE "USB_COMMON"
 
-within the corresponding compilation unit before any EXPORT_SYMBOL macro is
-used.
-
-2.3 Using the EXPORT_SYMBOL_GPL_FOR_MODULES() macro
-===================================================
-
-Symbols exported using this macro are put into a module namespace. This
-namespace cannot be imported.
-
-The macro takes a comma separated list of module names, allowing only those
-modules to access this symbol. Simple tail-globs are supported.
-
-For example:
-
-  EXPORT_SYMBOL_GPL_FOR_MODULES(preempt_notifier_inc, "kvm,kvm-*")
-
-will limit usage of this symbol to modules whoes name matches the given
-patterns.
+within the corresponding compilation unit before the #include for
+<linux/export.h>. Typically it's placed before the first #include statement.
 
 3. How to use Symbols exported in Namespaces
 ============================================
@@ -113,7 +93,7 @@ for the namespaces it uses symbols from. E.g. a module using the
 usb_stor_suspend symbol from above, needs to import the namespace USB_STORAGE
 using a statement like::
 
-	MODULE_IMPORT_NS(USB_STORAGE);
+	MODULE_IMPORT_NS("USB_STORAGE");
 
 This will create a ``modinfo`` tag in the module for each imported namespace.
 This has the side effect, that the imported namespaces of a module can be
@@ -174,6 +154,3 @@ in-tree modules::
 You can also run nsdeps for external module builds. A typical usage is::
 
 	$ make -C <path_to_kernel_src> M=$PWD nsdeps
-
-Note: it will happily generate an import statement for the module namespace;
-which will not work and generates build and runtime failures.

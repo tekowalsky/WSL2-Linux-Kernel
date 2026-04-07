@@ -117,13 +117,6 @@ struct bootrom_id_le {
 	__le32 boardrev;	/* Board revision */
 };
 
-struct brcmf_usb_image {
-	struct list_head list;
-	s8 *fwname;
-	u8 *image;
-	int image_len;
-};
-
 struct brcmf_usbdev_info {
 	struct brcmf_usbdev bus_pub; /* MUST BE FIRST */
 	spinlock_t qlock;
@@ -903,16 +896,14 @@ brcmf_usb_dl_writeimage(struct brcmf_usbdev_info *devinfo, u8 *fw, int fwlen)
 	}
 
 	/* 1) Prepare USB boot loader for runtime image */
-	err = brcmf_usb_dl_cmd(devinfo, DL_START, &state, sizeof(state));
-	if (err)
-		goto fail;
+	brcmf_usb_dl_cmd(devinfo, DL_START, &state, sizeof(state));
 
 	rdlstate = le32_to_cpu(state.state);
 	rdlbytes = le32_to_cpu(state.bytes);
 
 	/* 2) Check we are in the Waiting state */
 	if (rdlstate != DL_WAITING) {
-		brcmf_err("Invalid DL state: %u\n", rdlstate);
+		brcmf_err("Failed to DL_START\n");
 		err = -EINVAL;
 		goto fail;
 	}
@@ -1245,8 +1236,8 @@ brcmf_usb_prepare_fw_request(struct brcmf_usbdev_info *devinfo)
 static int brcmf_usb_probe_cb(struct brcmf_usbdev_info *devinfo,
 			      enum brcmf_fwvendor fwvid)
 {
-	struct brcmf_bus *bus = NULL;
-	struct brcmf_usbdev *bus_pub = NULL;
+	struct brcmf_bus *bus;
+	struct brcmf_usbdev *bus_pub;
 	struct device *dev = devinfo->dev;
 	struct brcmf_fw_request *fwreq;
 	int ret;
@@ -1256,7 +1247,7 @@ static int brcmf_usb_probe_cb(struct brcmf_usbdev_info *devinfo,
 	if (!bus_pub)
 		return -ENODEV;
 
-	bus = kzalloc(sizeof(struct brcmf_bus), GFP_ATOMIC);
+	bus = kzalloc(sizeof(*bus), GFP_ATOMIC);
 	if (!bus) {
 		ret = -ENOMEM;
 		goto fail;
@@ -1281,6 +1272,9 @@ static int brcmf_usb_probe_cb(struct brcmf_usbdev_info *devinfo,
 		ret = -ENOMEM;
 		goto fail;
 	}
+	ret = PTR_ERR_OR_ZERO(devinfo->settings);
+	if (ret < 0)
+		goto fail;
 
 	if (!brcmf_usb_dlneeded(devinfo)) {
 		ret = brcmf_alloc(devinfo->dev, devinfo->settings);
@@ -1583,7 +1577,7 @@ static int brcmf_usb_reset_device(struct device *dev, void *notused)
 
 void brcmf_usb_exit(void)
 {
-	struct device_driver *drv = &brcmf_usbdrvr.drvwrap.driver;
+	struct device_driver *drv = &brcmf_usbdrvr.driver;
 	int ret;
 
 	brcmf_dbg(USB, "Enter\n");

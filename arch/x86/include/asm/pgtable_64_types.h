@@ -21,9 +21,9 @@ typedef unsigned long	pgprotval_t;
 typedef struct { pteval_t pte; } pte_t;
 typedef struct { pmdval_t pmd; } pmd_t;
 
-#ifdef CONFIG_X86_5LEVEL
 extern unsigned int __pgtable_l5_enabled;
 
+#ifdef CONFIG_X86_5LEVEL
 #ifdef USE_EARLY_PGTABLE_L5
 /*
  * cpu_feature_enabled() is not available in early boot code.
@@ -40,9 +40,6 @@ static inline bool pgtable_l5_enabled(void)
 #else
 #define pgtable_l5_enabled() 0
 #endif /* CONFIG_X86_5LEVEL */
-
-#define ARCH_PAGE_TABLE_SYNC_MASK \
-	(pgtable_l5_enabled() ? PGTBL_PGD_MODIFIED : PGTBL_P4D_MODIFIED)
 
 extern unsigned int pgdir_shift;
 extern unsigned int ptrs_per_p4d;
@@ -144,7 +141,7 @@ extern unsigned int ptrs_per_p4d;
 #endif /* CONFIG_DYNAMIC_MEMORY_LAYOUT */
 
 #ifdef CONFIG_RANDOMIZE_MEMORY
-# define PHYSMEM_END		physmem_end
+# define DIRECT_MAP_PHYSMEM_END	direct_map_physmem_end
 #endif
 
 /*

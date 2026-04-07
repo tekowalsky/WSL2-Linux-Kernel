@@ -57,6 +57,7 @@
 #define SEC_TYPE_MASK		0x0F
 #define SEC_DONE_MASK		0x0001
 #define SEC_ICV_MASK		0x000E
+#define SEC_SQE_LEN_RATE_MASK	0x3
 
 #define SEC_TOTAL_IV_SZ(depth)	(SEC_IV_SIZE * (depth))
 #define SEC_SGL_SGE_NR		128
@@ -79,16 +80,16 @@
 #define SEC_TOTAL_PBUF_SZ(depth)	(PAGE_SIZE * SEC_PBUF_PAGE_NUM(depth) +	\
 				SEC_PBUF_LEFT_SZ(depth))
 
+#define SEC_SQE_LEN_RATE	4
 #define SEC_SQE_CFLAG		2
 #define SEC_SQE_AEAD_FLAG	3
 #define SEC_SQE_DONE		0x1
 #define SEC_ICV_ERR		0x2
+#define MIN_MAC_LEN		4
 #define MAC_LEN_MASK		0x1U
 #define MAX_INPUT_DATA_LEN	0xFFFE00
 #define BITS_MASK		0xFF
-#define WORD_MASK		0x3
 #define BYTE_BITS		0x8
-#define BYTES_TO_WORDS(bcount)	((bcount) >> 2)
 #define SEC_XTS_NAME_SZ		0x3
 #define IV_CM_CAL_NUM		2
 #define IV_CL_MASK		0x7
@@ -103,6 +104,9 @@
 #define IV_CTR_INIT		0x1
 #define IV_BYTE_OFFSET		0x8
 
+static DEFINE_MUTEX(sec_algs_lock);
+static unsigned int sec_available_devs;
+
 struct sec_skcipher {
 	u64 alg_msk;
 	struct skcipher_alg alg;
@@ -114,7 +118,7 @@ struct sec_aead {
 };
 
 /* Get an en/de-cipher queue cyclically to balance load over queues of TFM */
-static inline int sec_alloc_queue_id(struct sec_ctx *ctx, struct sec_req *req)
+static inline u32 sec_alloc_queue_id(struct sec_ctx *ctx, struct sec_req *req)
 {
 	if (req->c_req.encrypt)
 		return (u32)atomic_inc_return(&ctx->enc_qcyclic) %
@@ -483,8 +487,7 @@ static void sec_alg_resource_free(struct sec_ctx *ctx,
 	}
 }
 
-static int sec_alloc_qp_ctx_resource(struct hisi_qm *qm, struct sec_ctx *ctx,
-				     struct sec_qp_ctx *qp_ctx)
+static int sec_alloc_qp_ctx_resource(struct sec_ctx *ctx, struct sec_qp_ctx *qp_ctx)
 {
 	u16 q_depth = qp_ctx->qp->sq_depth;
 	struct device *dev = ctx->dev;
@@ -539,8 +542,7 @@ static void sec_free_qp_ctx_resource(struct sec_ctx *ctx, struct sec_qp_ctx *qp_
 	kfree(qp_ctx->req_list);
 }
 
-static int sec_create_qp_ctx(struct hisi_qm *qm, struct sec_ctx *ctx,
-			     int qp_ctx_id, int alg_type)
+static int sec_create_qp_ctx(struct sec_ctx *ctx, int qp_ctx_id)
 {
 	struct sec_qp_ctx *qp_ctx;
 	struct hisi_qp *qp;
@@ -559,7 +561,7 @@ static int sec_create_qp_ctx(struct hisi_qm *qm, struct sec_ctx *ctx,
 	idr_init(&qp_ctx->req_idr);
 	INIT_LIST_HEAD(&qp_ctx->backlog);
 
-	ret = sec_alloc_qp_ctx_resource(qm, ctx, qp_ctx);
+	ret = sec_alloc_qp_ctx_resource(ctx, qp_ctx);
 	if (ret)
 		goto err_destroy_idr;
 
@@ -612,7 +614,7 @@ static int sec_ctx_base_init(struct sec_ctx *ctx)
 	}
 
 	for (i = 0; i < sec->ctx_q_num; i++) {
-		ret = sec_create_qp_ctx(&sec->qm, ctx, i, 0);
+		ret = sec_create_qp_ctx(ctx, i);
 		if (ret)
 			goto err_sec_release_qp_ctx;
 	}
@@ -689,10 +691,14 @@ static int sec_skcipher_fbtfm_init(struct crypto_skcipher *tfm)
 
 	c_ctx->fallback = false;
 
+	/* Currently, only XTS mode need fallback tfm when using 192bit key */
+	if (likely(strncmp(alg, "xts", SEC_XTS_NAME_SZ)))
+		return 0;
+
 	c_ctx->fbtfm = crypto_alloc_sync_skcipher(alg, 0,
 						  CRYPTO_ALG_NEED_FALLBACK);
 	if (IS_ERR(c_ctx->fbtfm)) {
-		pr_err("failed to alloc fallback tfm for %s!\n", alg);
+		pr_err("failed to alloc xts mode fallback tfm!\n");
 		return PTR_ERR(c_ctx->fbtfm);
 	}
 
@@ -744,9 +750,7 @@ static void sec_skcipher_uninit(struct crypto_skcipher *tfm)
 	sec_ctx_base_uninit(ctx);
 }
 
-static int sec_skcipher_3des_setkey(struct crypto_skcipher *tfm, const u8 *key,
-				    const u32 keylen,
-				    const enum sec_cmode c_mode)
+static int sec_skcipher_3des_setkey(struct crypto_skcipher *tfm, const u8 *key, const u32 keylen)
 {
 	struct sec_ctx *ctx = crypto_skcipher_ctx(tfm);
 	struct sec_cipher_ctx *c_ctx = &ctx->c_ctx;
@@ -837,7 +841,7 @@ static int sec_skcipher_setkey(struct crypto_skcipher *tfm, const u8 *key,
 
 	switch (c_alg) {
 	case SEC_CALG_3DES:
-		ret = sec_skcipher_3des_setkey(tfm, key, keylen, c_mode);
+		ret = sec_skcipher_3des_setkey(tfm, key, keylen);
 		break;
 	case SEC_CALG_AES:
 	case SEC_CALG_SM4:
@@ -854,7 +858,7 @@ static int sec_skcipher_setkey(struct crypto_skcipher *tfm, const u8 *key,
 	}
 
 	memcpy(c_ctx->c_key, key, keylen);
-	if (c_ctx->fbtfm) {
+	if (c_ctx->fallback && c_ctx->fbtfm) {
 		ret = crypto_sync_skcipher_setkey(c_ctx->fbtfm, key, keylen);
 		if (ret) {
 			dev_err(dev, "failed to set fallback skcipher key!\n");
@@ -874,15 +878,11 @@ static int sec_setkey_##name(struct crypto_skcipher *tfm, const u8 *key,\
 GEN_SEC_SETKEY_FUNC(aes_ecb, SEC_CALG_AES, SEC_CMODE_ECB)
 GEN_SEC_SETKEY_FUNC(aes_cbc, SEC_CALG_AES, SEC_CMODE_CBC)
 GEN_SEC_SETKEY_FUNC(aes_xts, SEC_CALG_AES, SEC_CMODE_XTS)
-GEN_SEC_SETKEY_FUNC(aes_ofb, SEC_CALG_AES, SEC_CMODE_OFB)
-GEN_SEC_SETKEY_FUNC(aes_cfb, SEC_CALG_AES, SEC_CMODE_CFB)
 GEN_SEC_SETKEY_FUNC(aes_ctr, SEC_CALG_AES, SEC_CMODE_CTR)
 GEN_SEC_SETKEY_FUNC(3des_ecb, SEC_CALG_3DES, SEC_CMODE_ECB)
 GEN_SEC_SETKEY_FUNC(3des_cbc, SEC_CALG_3DES, SEC_CMODE_CBC)
 GEN_SEC_SETKEY_FUNC(sm4_xts, SEC_CALG_SM4, SEC_CMODE_XTS)
 GEN_SEC_SETKEY_FUNC(sm4_cbc, SEC_CALG_SM4, SEC_CMODE_CBC)
-GEN_SEC_SETKEY_FUNC(sm4_ofb, SEC_CALG_SM4, SEC_CMODE_OFB)
-GEN_SEC_SETKEY_FUNC(sm4_cfb, SEC_CALG_SM4, SEC_CMODE_CFB)
 GEN_SEC_SETKEY_FUNC(sm4_ctr, SEC_CALG_SM4, SEC_CMODE_CTR)
 
 static int sec_cipher_pbuf_map(struct sec_ctx *ctx, struct sec_req *req,
@@ -1008,6 +1008,7 @@ static int sec_cipher_map(struct sec_ctx *ctx, struct sec_req *req,
 		ret = sec_aead_mac_init(a_req);
 		if (unlikely(ret)) {
 			dev_err(dev, "fail to init mac data for ICV!\n");
+			hisi_acc_sg_buf_unmap(dev, src, req->in);
 			return ret;
 		}
 	}
@@ -1089,6 +1090,11 @@ static int sec_aead_auth_set_key(struct sec_auth_ctx *ctx,
 	struct crypto_shash *hash_tfm = ctx->hash_tfm;
 	int blocksize, digestsize, ret;
 
+	if (!keys->authkeylen) {
+		pr_err("hisi_sec2: aead auth key error!\n");
+		return -EINVAL;
+	}
+
 	blocksize = crypto_shash_blocksize(hash_tfm);
 	digestsize = crypto_shash_digestsize(hash_tfm);
 	if (keys->authkeylen > blocksize) {
@@ -1100,8 +1106,7 @@ static int sec_aead_auth_set_key(struct sec_auth_ctx *ctx,
 		}
 		ctx->a_key_len = digestsize;
 	} else {
-		if (keys->authkeylen)
-			memcpy(ctx->a_key, keys->authkey, keys->authkeylen);
+		memcpy(ctx->a_key, keys->authkey, keys->authkeylen);
 		ctx->a_key_len = keys->authkeylen;
 	}
 
@@ -1155,10 +1160,8 @@ static int sec_aead_setkey(struct crypto_aead *tfm, const u8 *key,
 	}
 
 	ret = crypto_authenc_extractkeys(&keys, key, keylen);
-	if (ret) {
-		dev_err(dev, "sec extract aead keys err!\n");
+	if (ret)
 		goto bad_key;
-	}
 
 	ret = sec_aead_aes_set_key(c_ctx, &keys);
 	if (ret) {
@@ -1169,6 +1172,12 @@ static int sec_aead_setkey(struct crypto_aead *tfm, const u8 *key,
 	ret = sec_aead_auth_set_key(&ctx->a_ctx, &keys);
 	if (ret) {
 		dev_err(dev, "set sec auth key err!\n");
+		goto bad_key;
+	}
+
+	if (ctx->a_ctx.a_key_len & SEC_SQE_LEN_RATE_MASK) {
+		ret = -EINVAL;
+		dev_err(dev, "AUTH key length error!\n");
 		goto bad_key;
 	}
 
@@ -1345,7 +1354,7 @@ static int sec_skcipher_bd_fill_v3(struct sec_ctx *ctx, struct sec_req *req)
 	sec_sqe3->bd_param = cpu_to_le32(bd_param);
 
 	sec_sqe3->c_len_ivin |= cpu_to_le32(c_req->c_len);
-	sec_sqe3->tag = cpu_to_le64(req);
+	sec_sqe3->tag = cpu_to_le64((unsigned long)req);
 
 	return 0;
 }
@@ -1574,10 +1583,11 @@ static void sec_auth_bd_fill_ex(struct sec_auth_ctx *ctx, int dir,
 
 	sec_sqe->type2.a_key_addr = cpu_to_le64(ctx->a_key_dma);
 
-	sec_sqe->type2.mac_key_alg = cpu_to_le32(BYTES_TO_WORDS(authsize));
+	sec_sqe->type2.mac_key_alg = cpu_to_le32(authsize / SEC_SQE_LEN_RATE);
 
 	sec_sqe->type2.mac_key_alg |=
-			cpu_to_le32((u32)BYTES_TO_WORDS(ctx->a_key_len) << SEC_AKEY_OFFSET);
+			cpu_to_le32((u32)((ctx->a_key_len) /
+			SEC_SQE_LEN_RATE) << SEC_AKEY_OFFSET);
 
 	sec_sqe->type2.mac_key_alg |=
 			cpu_to_le32((u32)(ctx->a_alg) << SEC_AEAD_ALG_OFFSET);
@@ -1629,10 +1639,12 @@ static void sec_auth_bd_fill_ex_v3(struct sec_auth_ctx *ctx, int dir,
 	sqe3->a_key_addr = cpu_to_le64(ctx->a_key_dma);
 
 	sqe3->auth_mac_key |=
-			cpu_to_le32(BYTES_TO_WORDS(authsize) << SEC_MAC_OFFSET_V3);
+			cpu_to_le32((u32)(authsize /
+			SEC_SQE_LEN_RATE) << SEC_MAC_OFFSET_V3);
 
 	sqe3->auth_mac_key |=
-			cpu_to_le32((u32)BYTES_TO_WORDS(ctx->a_key_len) << SEC_AKEY_OFFSET_V3);
+			cpu_to_le32((u32)(ctx->a_key_len /
+			SEC_SQE_LEN_RATE) << SEC_AKEY_OFFSET_V3);
 
 	sqe3->auth_mac_key |=
 			cpu_to_le32((u32)(ctx->a_alg) << SEC_AUTH_ALG_OFFSET_V3);
@@ -1991,7 +2003,8 @@ static int sec_aead_sha512_ctx_init(struct crypto_aead *tfm)
 	return sec_aead_ctx_init(tfm, "sha512");
 }
 
-static int sec_skcipher_cryptlen_check(struct sec_ctx *ctx, struct sec_req *sreq)
+static int sec_skcipher_cryptlen_check(struct sec_ctx *ctx,
+	struct sec_req *sreq)
 {
 	u32 cryptlen = sreq->c_req.sk_req->cryptlen;
 	struct device *dev = ctx->dev;
@@ -2012,9 +2025,11 @@ static int sec_skcipher_cryptlen_check(struct sec_ctx *ctx, struct sec_req *sreq
 			ret = -EINVAL;
 		}
 		break;
-	case SEC_CMODE_CFB:
-	case SEC_CMODE_OFB:
 	case SEC_CMODE_CTR:
+		if (unlikely(ctx->sec->qm.ver < QM_HW_V3)) {
+			dev_err(dev, "skcipher HW version error!\n");
+			ret = -EINVAL;
+		}
 		break;
 	default:
 		ret = -EINVAL;
@@ -2023,21 +2038,17 @@ static int sec_skcipher_cryptlen_check(struct sec_ctx *ctx, struct sec_req *sreq
 	return ret;
 }
 
-static int sec_skcipher_param_check(struct sec_ctx *ctx,
-				    struct sec_req *sreq, bool *need_fallback)
+static int sec_skcipher_param_check(struct sec_ctx *ctx, struct sec_req *sreq)
 {
 	struct skcipher_request *sk_req = sreq->c_req.sk_req;
 	struct device *dev = ctx->dev;
 	u8 c_alg = ctx->c_ctx.c_alg;
 
-	if (unlikely(!sk_req->src || !sk_req->dst)) {
+	if (unlikely(!sk_req->src || !sk_req->dst ||
+		     sk_req->cryptlen > MAX_INPUT_DATA_LEN)) {
 		dev_err(dev, "skcipher input param error!\n");
 		return -EINVAL;
 	}
-
-	if (sk_req->cryptlen > MAX_INPUT_DATA_LEN)
-		*need_fallback = true;
-
 	sreq->c_req.c_len = sk_req->cryptlen;
 
 	if (ctx->pbuf_supported && sk_req->cryptlen <= SEC_PBUF_SZ)
@@ -2095,7 +2106,6 @@ static int sec_skcipher_crypto(struct skcipher_request *sk_req, bool encrypt)
 	struct crypto_skcipher *tfm = crypto_skcipher_reqtfm(sk_req);
 	struct sec_req *req = skcipher_request_ctx(sk_req);
 	struct sec_ctx *ctx = crypto_skcipher_ctx(tfm);
-	bool need_fallback = false;
 	int ret;
 
 	if (!sk_req->cryptlen) {
@@ -2109,11 +2119,11 @@ static int sec_skcipher_crypto(struct skcipher_request *sk_req, bool encrypt)
 	req->c_req.encrypt = encrypt;
 	req->ctx = ctx;
 
-	ret = sec_skcipher_param_check(ctx, req, &need_fallback);
+	ret = sec_skcipher_param_check(ctx, req);
 	if (unlikely(ret))
 		return -EINVAL;
 
-	if (unlikely(ctx->c_ctx.fallback || need_fallback))
+	if (unlikely(ctx->c_ctx.fallback))
 		return sec_skcipher_soft_crypto(ctx, sk_req, encrypt);
 
 	return ctx->req_op->process(ctx, req);
@@ -2129,8 +2139,8 @@ static int sec_skcipher_decrypt(struct skcipher_request *sk_req)
 	return sec_skcipher_crypto(sk_req, false);
 }
 
-#define SEC_SKCIPHER_GEN_ALG(sec_cra_name, sec_set_key, sec_min_key_size, \
-	sec_max_key_size, ctx_init, ctx_exit, blk_size, iv_size)\
+#define SEC_SKCIPHER_ALG(sec_cra_name, sec_set_key, \
+	sec_min_key_size, sec_max_key_size, blk_size, iv_size)\
 {\
 	.base = {\
 		.cra_name = sec_cra_name,\
@@ -2142,8 +2152,8 @@ static int sec_skcipher_decrypt(struct skcipher_request *sk_req)
 		.cra_ctxsize = sizeof(struct sec_ctx),\
 		.cra_module = THIS_MODULE,\
 	},\
-	.init = ctx_init,\
-	.exit = ctx_exit,\
+	.init = sec_skcipher_ctx_init,\
+	.exit = sec_skcipher_ctx_exit,\
 	.setkey = sec_set_key,\
 	.decrypt = sec_skcipher_decrypt,\
 	.encrypt = sec_skcipher_encrypt,\
@@ -2151,11 +2161,6 @@ static int sec_skcipher_decrypt(struct skcipher_request *sk_req)
 	.max_keysize = sec_max_key_size,\
 	.ivsize = iv_size,\
 }
-
-#define SEC_SKCIPHER_ALG(name, key_func, min_key_size, \
-	max_key_size, blk_size, iv_size) \
-	SEC_SKCIPHER_GEN_ALG(name, key_func, min_key_size, max_key_size, \
-	sec_skcipher_ctx_init, sec_skcipher_ctx_exit, blk_size, iv_size)
 
 static struct sec_skcipher sec_skciphers[] = {
 	{
@@ -2179,16 +2184,6 @@ static struct sec_skcipher sec_skciphers[] = {
 					SEC_XTS_MAX_KEY_SIZE, AES_BLOCK_SIZE, AES_BLOCK_SIZE),
 	},
 	{
-		.alg_msk = BIT(4),
-		.alg = SEC_SKCIPHER_ALG("ofb(aes)", sec_setkey_aes_ofb,	AES_MIN_KEY_SIZE,
-					AES_MAX_KEY_SIZE, SEC_MIN_BLOCK_SZ, AES_BLOCK_SIZE),
-	},
-	{
-		.alg_msk = BIT(5),
-		.alg = SEC_SKCIPHER_ALG("cfb(aes)", sec_setkey_aes_cfb,	AES_MIN_KEY_SIZE,
-					AES_MAX_KEY_SIZE, SEC_MIN_BLOCK_SZ, AES_BLOCK_SIZE),
-	},
-	{
 		.alg_msk = BIT(12),
 		.alg = SEC_SKCIPHER_ALG("cbc(sm4)", sec_setkey_sm4_cbc,	AES_MIN_KEY_SIZE,
 					AES_MIN_KEY_SIZE, AES_BLOCK_SIZE, AES_BLOCK_SIZE),
@@ -2202,16 +2197,6 @@ static struct sec_skcipher sec_skciphers[] = {
 		.alg_msk = BIT(14),
 		.alg = SEC_SKCIPHER_ALG("xts(sm4)", sec_setkey_sm4_xts,	SEC_XTS_MIN_KEY_SIZE,
 					SEC_XTS_MIN_KEY_SIZE, AES_BLOCK_SIZE, AES_BLOCK_SIZE),
-	},
-	{
-		.alg_msk = BIT(15),
-		.alg = SEC_SKCIPHER_ALG("ofb(sm4)", sec_setkey_sm4_ofb,	AES_MIN_KEY_SIZE,
-					AES_MIN_KEY_SIZE, SEC_MIN_BLOCK_SZ, AES_BLOCK_SIZE),
-	},
-	{
-		.alg_msk = BIT(16),
-		.alg = SEC_SKCIPHER_ALG("cfb(sm4)", sec_setkey_sm4_cfb,	AES_MIN_KEY_SIZE,
-					AES_MIN_KEY_SIZE, SEC_MIN_BLOCK_SZ, AES_BLOCK_SIZE),
 	},
 	{
 		.alg_msk = BIT(23),
@@ -2246,35 +2231,52 @@ static int sec_aead_spec_check(struct sec_ctx *ctx, struct sec_req *sreq)
 	struct crypto_aead *tfm = crypto_aead_reqtfm(req);
 	size_t sz = crypto_aead_authsize(tfm);
 	u8 c_mode = ctx->c_ctx.c_mode;
+	struct device *dev = ctx->dev;
 	int ret;
 
-	if (unlikely(ctx->sec->qm.ver == QM_HW_V2 && !sreq->c_req.c_len))
+	/* Hardware does not handle cases where authsize is less than 4 bytes */
+	if (unlikely(sz < MIN_MAC_LEN)) {
+		sreq->aead_req.fallback = true;
 		return -EINVAL;
+	}
 
 	if (unlikely(req->cryptlen + req->assoclen > MAX_INPUT_DATA_LEN ||
-		     req->assoclen > SEC_MAX_AAD_LEN))
+	    req->assoclen > SEC_MAX_AAD_LEN)) {
+		dev_err(dev, "aead input spec error!\n");
 		return -EINVAL;
+	}
 
 	if (c_mode == SEC_CMODE_CCM) {
-		if (unlikely(req->assoclen > SEC_MAX_CCM_AAD_LEN))
+		if (unlikely(req->assoclen > SEC_MAX_CCM_AAD_LEN)) {
+			dev_err_ratelimited(dev, "CCM input aad parameter is too long!\n");
 			return -EINVAL;
-
+		}
 		ret = aead_iv_demension_check(req);
-		if (unlikely(ret))
+		if (ret) {
+			dev_err(dev, "aead input iv param error!\n");
+			return ret;
+		}
+	}
+
+	if (sreq->c_req.encrypt)
+		sreq->c_req.c_len = req->cryptlen;
+	else
+		sreq->c_req.c_len = req->cryptlen - sz;
+	if (c_mode == SEC_CMODE_CBC) {
+		if (unlikely(sreq->c_req.c_len & (AES_BLOCK_SIZE - 1))) {
+			dev_err(dev, "aead crypto length error!\n");
 			return -EINVAL;
-	} else if (c_mode == SEC_CMODE_CBC) {
-		if (unlikely(sz & WORD_MASK))
-			return -EINVAL;
-		if (unlikely(ctx->a_ctx.a_key_len & WORD_MASK))
-			return -EINVAL;
+		}
 	}
 
 	return 0;
 }
 
-static int sec_aead_param_check(struct sec_ctx *ctx, struct sec_req *sreq, bool *need_fallback)
+static int sec_aead_param_check(struct sec_ctx *ctx, struct sec_req *sreq)
 {
 	struct aead_request *req = sreq->aead_req.aead_req;
+	struct crypto_aead *tfm = crypto_aead_reqtfm(req);
+	size_t authsize = crypto_aead_authsize(tfm);
 	struct device *dev = ctx->dev;
 	u8 c_alg = ctx->c_ctx.c_alg;
 
@@ -2283,10 +2285,12 @@ static int sec_aead_param_check(struct sec_ctx *ctx, struct sec_req *sreq, bool 
 		return -EINVAL;
 	}
 
-	if (unlikely(ctx->c_ctx.c_mode == SEC_CMODE_CBC &&
-		     sreq->c_req.c_len & (AES_BLOCK_SIZE - 1))) {
-		dev_err(dev, "aead cbc mode input data length error!\n");
-		return -EINVAL;
+	if (ctx->sec->qm.ver == QM_HW_V2) {
+		if (unlikely(!req->cryptlen || (!sreq->c_req.encrypt &&
+			     req->cryptlen <= authsize))) {
+			sreq->aead_req.fallback = true;
+			return -EINVAL;
+		}
 	}
 
 	/* Support AES or SM4 */
@@ -2295,10 +2299,8 @@ static int sec_aead_param_check(struct sec_ctx *ctx, struct sec_req *sreq, bool 
 		return -EINVAL;
 	}
 
-	if (unlikely(sec_aead_spec_check(ctx, sreq))) {
-		*need_fallback = true;
+	if (unlikely(sec_aead_spec_check(ctx, sreq)))
 		return -EINVAL;
-	}
 
 	if (ctx->pbuf_supported && (req->cryptlen + req->assoclen) <=
 		SEC_PBUF_SZ)
@@ -2342,19 +2344,17 @@ static int sec_aead_crypto(struct aead_request *a_req, bool encrypt)
 	struct crypto_aead *tfm = crypto_aead_reqtfm(a_req);
 	struct sec_req *req = aead_request_ctx(a_req);
 	struct sec_ctx *ctx = crypto_aead_ctx(tfm);
-	size_t sz = crypto_aead_authsize(tfm);
-	bool need_fallback = false;
 	int ret;
 
 	req->flag = a_req->base.flags;
 	req->aead_req.aead_req = a_req;
 	req->c_req.encrypt = encrypt;
 	req->ctx = ctx;
-	req->c_req.c_len = a_req->cryptlen - (req->c_req.encrypt ? 0 : sz);
+	req->aead_req.fallback = false;
 
-	ret = sec_aead_param_check(ctx, req, &need_fallback);
+	ret = sec_aead_param_check(ctx, req);
 	if (unlikely(ret)) {
-		if (need_fallback)
+		if (req->aead_req.fallback)
 			return sec_aead_soft_crypto(ctx, a_req, encrypt);
 		return -EINVAL;
 	}
@@ -2509,18 +2509,32 @@ int sec_register_to_crypto(struct hisi_qm *qm)
 	u64 alg_mask;
 	int ret = 0;
 
-	alg_mask = sec_get_alg_bitmap(qm, SEC_DRV_ALG_BITMAP_HIGH_IDX,
-				      SEC_DRV_ALG_BITMAP_LOW_IDX);
+	alg_mask = sec_get_alg_bitmap(qm, SEC_DRV_ALG_BITMAP_HIGH_TB,
+				      SEC_DRV_ALG_BITMAP_LOW_TB);
 
+	mutex_lock(&sec_algs_lock);
+	if (sec_available_devs) {
+		sec_available_devs++;
+		goto unlock;
+	}
 
 	ret = sec_register_skcipher(alg_mask);
 	if (ret)
-		return ret;
+		goto unlock;
 
 	ret = sec_register_aead(alg_mask);
 	if (ret)
-		sec_unregister_skcipher(alg_mask, ARRAY_SIZE(sec_skciphers));
+		goto unreg_skcipher;
 
+	sec_available_devs++;
+	mutex_unlock(&sec_algs_lock);
+
+	return 0;
+
+unreg_skcipher:
+	sec_unregister_skcipher(alg_mask, ARRAY_SIZE(sec_skciphers));
+unlock:
+	mutex_unlock(&sec_algs_lock);
 	return ret;
 }
 
@@ -2528,9 +2542,16 @@ void sec_unregister_from_crypto(struct hisi_qm *qm)
 {
 	u64 alg_mask;
 
-	alg_mask = sec_get_alg_bitmap(qm, SEC_DRV_ALG_BITMAP_HIGH_IDX,
-				      SEC_DRV_ALG_BITMAP_LOW_IDX);
+	alg_mask = sec_get_alg_bitmap(qm, SEC_DRV_ALG_BITMAP_HIGH_TB,
+				      SEC_DRV_ALG_BITMAP_LOW_TB);
+
+	mutex_lock(&sec_algs_lock);
+	if (--sec_available_devs)
+		goto unlock;
 
 	sec_unregister_aead(alg_mask, ARRAY_SIZE(sec_aeads));
 	sec_unregister_skcipher(alg_mask, ARRAY_SIZE(sec_skciphers));
+
+unlock:
+	mutex_unlock(&sec_algs_lock);
 }

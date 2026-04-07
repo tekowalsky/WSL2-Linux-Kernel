@@ -136,7 +136,15 @@ static int efi_secret_unlink(struct inode *dir, struct dentry *dentry)
 		if (s->fs_files[i] == dentry)
 			s->fs_files[i] = NULL;
 
-	return simple_unlink(inode, dentry);
+	/*
+	 * securityfs_remove tries to lock the directory's inode, but we reach
+	 * the unlink callback when it's already locked
+	 */
+	inode_unlock(dir);
+	securityfs_remove(dentry);
+	inode_lock(dir);
+
+	return 0;
 }
 
 static const struct inode_operations efi_secret_dir_inode_operations = {
@@ -318,11 +326,10 @@ err_unmap:
 	return ret;
 }
 
-static int efi_secret_remove(struct platform_device *dev)
+static void efi_secret_remove(struct platform_device *dev)
 {
 	efi_secret_securityfs_teardown(dev);
 	efi_secret_unmap_area();
-	return 0;
 }
 
 static struct platform_driver efi_secret_driver = {

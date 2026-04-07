@@ -60,19 +60,19 @@ static int nf_br_ip_fragment(struct net *net, struct sock *sk,
 		struct ip_fraglist_iter iter;
 		struct sk_buff *frag;
 
-		if (first_len - hlen > mtu)
+		if (first_len - hlen > mtu ||
+		    skb_headroom(skb) < ll_rs)
 			goto blackhole;
 
-		if (skb_cloned(skb) ||
-		    skb_headroom(skb) < ll_rs)
+		if (skb_cloned(skb))
 			goto slow_path;
 
 		skb_walk_frags(skb, frag) {
-			if (frag->len > mtu)
+			if (frag->len > mtu ||
+			    skb_headroom(frag) < hlen + ll_rs)
 				goto blackhole;
 
-			if (skb_shared(frag) ||
-			    skb_headroom(frag) < hlen + ll_rs)
+			if (skb_shared(frag))
 				goto slow_path;
 		}
 
@@ -452,3 +452,4 @@ module_exit(nf_conntrack_l3proto_bridge_fini);
 
 MODULE_ALIAS("nf_conntrack-" __stringify(AF_BRIDGE));
 MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("Bridge IPv4 and IPv6 connection tracking");

@@ -84,6 +84,7 @@ enum {
 #define GL_SKIP			0x0100
 #define GL_NOPID		0x0200
 #define GL_NOCACHE		0x0400
+#define GL_NOBLOCK		0x0800
   
 /*
  * lm_async_cb return flags
@@ -154,21 +155,6 @@ out:
 	spin_unlock(&gl->gl_lockref.lock);
 
 	return gh;
-}
-
-static inline int gfs2_glock_is_held_excl(struct gfs2_glock *gl)
-{
-	return gl->gl_state == LM_ST_EXCLUSIVE;
-}
-
-static inline int gfs2_glock_is_held_dfrd(struct gfs2_glock *gl)
-{
-	return gl->gl_state == LM_ST_DEFERRED;
-}
-
-static inline int gfs2_glock_is_held_shrd(struct gfs2_glock *gl)
-{
-	return gl->gl_state == LM_ST_SHARED;
 }
 
 static inline struct address_space *gfs2_glock2aspace(struct gfs2_glock *gl)
@@ -265,7 +251,6 @@ void gfs2_flush_delete_work(struct gfs2_sbd *sdp);
 void gfs2_gl_hash_clear(struct gfs2_sbd *sdp);
 void gfs2_gl_dq_holders(struct gfs2_sbd *sdp);
 void gfs2_glock_thaw(struct gfs2_sbd *sdp);
-void gfs2_glock_add_to_lru(struct gfs2_glock *gl);
 void gfs2_glock_free(struct gfs2_glock *gl);
 void gfs2_glock_free_later(struct gfs2_glock *gl);
 
@@ -299,5 +284,11 @@ static inline bool gfs2_holder_queued(struct gfs2_holder *gh)
 
 void gfs2_inode_remember_delete(struct gfs2_glock *gl, u64 generation);
 bool gfs2_inode_already_deleted(struct gfs2_glock *gl, u64 generation);
+
+static inline bool glock_needs_demote(struct gfs2_glock *gl)
+{
+	return (test_bit(GLF_DEMOTE, &gl->gl_flags) ||
+		test_bit(GLF_PENDING_DEMOTE, &gl->gl_flags));
+}
 
 #endif /* __GLOCK_DOT_H__ */

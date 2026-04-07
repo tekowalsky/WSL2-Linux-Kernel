@@ -307,7 +307,7 @@ static int lcd2s_i2c_probe(struct i2c_client *i2c)
 	if (err < 0)
 		return err;
 
-	lcd = charlcd_alloc(0);
+	lcd = charlcd_alloc();
 	if (!lcd)
 		return -ENOMEM;
 
@@ -349,7 +349,7 @@ static void lcd2s_i2c_remove(struct i2c_client *i2c)
 }
 
 static const struct i2c_device_id lcd2s_i2c_id[] = {
-	{ "lcd2s", 0 },
+	{ "lcd2s" },
 	{ }
 };
 MODULE_DEVICE_TABLE(i2c, lcd2s_i2c_id);

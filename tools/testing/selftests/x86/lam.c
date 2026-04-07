@@ -237,7 +237,7 @@ static uint64_t set_metadata(uint64_t src, unsigned long lam)
  * both pointers should point to the same address.
  *
  * @return:
- * 0: value on the pointer with metadate and value on original are same
+ * 0: value on the pointer with metadata and value on original are same
  * 1: not same.
  */
 static int handle_lam_test(void *src, unsigned int lam)
@@ -817,7 +817,7 @@ static void run_test(struct testcases *test, int count)
 
 		/* return 3 is not support LA57, the case should be skipped */
 		if (ret == 3) {
-			ksft_test_result_skip(t->msg);
+			ksft_test_result_skip("%s", t->msg);
 			continue;
 		}
 
@@ -826,7 +826,7 @@ static void run_test(struct testcases *test, int count)
 		else
 			ret = !(t->expected);
 
-		ksft_test_result(ret, t->msg);
+		ksft_test_result(ret, "%s", t->msg);
 	}
 }
 
@@ -1183,7 +1183,7 @@ int main(int argc, char **argv)
 
 	if (!cpu_has_lam()) {
 		ksft_print_msg("Unsupported LAM feature!\n");
-		return -1;
+		return KSFT_SKIP;
 	}
 
 	while ((c = getopt(argc, argv, "ht:")) != -1) {
@@ -1237,5 +1237,5 @@ int main(int argc, char **argv)
 
 	ksft_set_plan(tests_cnt);
 
-	return ksft_exit_pass();
+	ksft_exit_pass();
 }

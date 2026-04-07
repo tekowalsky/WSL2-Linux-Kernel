@@ -29,7 +29,7 @@ SYM_CODE_START(startup_xen)
 	ANNOTATE_NOENDBR
 	cld
 
-	leaq	(__end_init_task - PTREGS_SIZE)(%rip), %rsp
+	leaq	__top_init_kernel_stack(%rip), %rsp
 
 	/* Set up %gs.
 	 *
@@ -100,9 +100,6 @@ SYM_FUNC_START(xen_hypercall_hvm)
 	push %r10
 	push %r9
 	push %r8
-#ifdef CONFIG_FRAME_POINTER
-	pushq $0	/* Dummy push for stack alignment. */
-#endif
 #endif
 	/* Set the vendor specific function. */
 	call __xen_hypercall_setfunc
@@ -119,9 +116,6 @@ SYM_FUNC_START(xen_hypercall_hvm)
 #else
 	lea xen_hypercall_amd(%rip), %rcx
 	cmp %rax, %rcx
-#ifdef CONFIG_FRAME_POINTER
-	pop %rax	/* Dummy pop. */
-#endif
 	pop %r8
 	pop %r9
 	pop %r10
@@ -156,7 +150,8 @@ SYM_FUNC_END(xen_hypercall_intel)
 	ELFNOTE(Xen, XEN_ELFNOTE_VIRT_BASE,      _ASM_PTR __START_KERNEL_map)
 	/* Map the p2m table to a 512GB-aligned user address. */
 	ELFNOTE(Xen, XEN_ELFNOTE_INIT_P2M,       .quad (PUD_SIZE * PTRS_PER_PUD))
-	ELFNOTE(Xen, XEN_ELFNOTE_ENTRY,          _ASM_PTR startup_xen)
+	ELFNOTE(Xen, XEN_ELFNOTE_ENTRY,          .globl xen_elfnote_entry;
+		xen_elfnote_entry: _ASM_PTR xen_elfnote_entry_value - .)
 	ELFNOTE(Xen, XEN_ELFNOTE_FEATURES,       .ascii "!writable_page_tables")
 	ELFNOTE(Xen, XEN_ELFNOTE_PAE_MODE,       .asciz "yes")
 	ELFNOTE(Xen, XEN_ELFNOTE_L1_MFN_VALID,

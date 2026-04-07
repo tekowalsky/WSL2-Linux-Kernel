@@ -43,7 +43,7 @@ typedef unsigned long		uintptr_t;
 typedef long			intptr_t;
 
 #ifdef CONFIG_HAVE_UID16
-/* This is defined by include/asm-{arch}/posix_types.h */
+/* This is defined by arch/{arch}/include/asm/posix_types.h */
 typedef __kernel_old_uid_t	old_uid_t;
 typedef __kernel_old_gid_t	old_gid_t;
 #endif /* CONFIG_UID16 */
@@ -120,6 +120,9 @@ typedef s64			int64_t;
 #define aligned_s64		__aligned_s64
 #define aligned_be64		__aligned_be64
 #define aligned_le64		__aligned_le64
+
+/* Nanosecond scalar representation for kernel time values */
+typedef s64	ktime_t;
 
 /**
  * The type used for indexing onto a disc or disc partition.

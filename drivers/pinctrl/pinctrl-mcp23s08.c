@@ -381,7 +381,8 @@ mcp23s08_direction_output(struct gpio_chip *chip, unsigned offset, int value)
 static irqreturn_t mcp23s08_irq(int irq, void *data)
 {
 	struct mcp23s08 *mcp = data;
-	int intcap, intcon, intf, i, gpio, gpio_orig, intcap_mask, defval;
+	int intcap, intcon, intf, i, gpio, gpio_orig, intcap_mask, defval, gpinten;
+	unsigned long int enabled_interrupts;
 	unsigned int child_irq;
 	bool intf_set, intcap_changed, gpio_bit_changed,
 		defval_changed, gpio_set;
@@ -401,6 +402,9 @@ static irqreturn_t mcp23s08_irq(int irq, void *data)
 	if (mcp_read(mcp, MCP_INTCON, &intcon))
 		goto unlock;
 
+	if (mcp_read(mcp, MCP_GPINTEN, &gpinten))
+		goto unlock;
+
 	if (mcp_read(mcp, MCP_DEFVAL, &defval))
 		goto unlock;
 
@@ -416,9 +420,12 @@ static irqreturn_t mcp23s08_irq(int irq, void *data)
 		"intcap 0x%04X intf 0x%04X gpio_orig 0x%04X gpio 0x%04X\n",
 		intcap, intf, gpio_orig, gpio);
 
-	for (i = 0; i < mcp->chip.ngpio; i++) {
-		/* We must check all of the inputs on the chip,
-		 * otherwise we may not notice a change on >=2 pins.
+	enabled_interrupts = gpinten;
+	for_each_set_bit(i, &enabled_interrupts, mcp->chip.ngpio) {
+		/*
+		 * We must check all of the inputs with enabled interrupts
+		 * on the chip, otherwise we may not notice a change
+		 * on more than one pin.
 		 *
 		 * On at least the mcp23s17, INTCAP is only updated
 		 * one byte at a time(INTCAPA and INTCAPB are
@@ -568,7 +575,7 @@ static void mcp23s08_irq_print_chip(struct irq_data *d, struct seq_file *p)
 	struct gpio_chip *gc = irq_data_get_irq_chip_data(d);
 	struct mcp23s08 *mcp = gpiochip_get_data(gc);
 
-	seq_printf(p, dev_name(mcp->dev));
+	seq_puts(p, dev_name(mcp->dev));
 }
 
 static const struct irq_chip mcp23s08_irq_chip = {
@@ -611,14 +618,6 @@ int mcp23s08_probe_one(struct mcp23s08 *mcp, struct device *dev,
 	mcp->chip.owner = THIS_MODULE;
 
 	mcp->reset_gpio = devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
-
-	/*
-	 * Reset the chip - we don't really know what state it's in, so reset
-	 * all pins to input first to prevent surprises.
-	 */
-	ret = mcp_write(mcp, MCP_IODIR, mcp->chip.ngpio == 16 ? 0xFFFF : 0xFF);
-	if (ret < 0)
-		return ret;
 
 	/* verify MCP_IOCON.SEQOP = 0, so sequential reads work,
 	 * and MCP_IOCON.HAEN = 1, so we work with all chips.
@@ -703,4 +702,5 @@ int mcp23s08_probe_one(struct mcp23s08 *mcp, struct device *dev,
 }
 EXPORT_SYMBOL_GPL(mcp23s08_probe_one);
 
+MODULE_DESCRIPTION("MCP23S08 SPI/I2C GPIO driver");
 MODULE_LICENSE("GPL");

@@ -121,6 +121,7 @@ struct af_alg_async_req {
  *
  * @tsgl_list:		Link to TX SGL
  * @iv:			IV for cipher operation
+ * @state:		Existing state for continuing operation
  * @aead_assoclen:	Length of AAD for AEAD cipher operations
  * @completion:		Work queue for synchronous operation
  * @used:		TX bytes sent to kernel. This variable is used to
@@ -134,7 +135,6 @@ struct af_alg_async_req {
  *			SG?
  * @enc:		Cryptographic operation to be performed when
  *			recvmsg is invoked.
- * @write:		True if we are in the middle of a write.
  * @init:		True if metadata has been sent.
  * @len:		Length of memory allocated for this data structure.
  * @inflight:		Non-zero when AIO requests are in flight.
@@ -143,6 +143,7 @@ struct af_alg_ctx {
 	struct list_head tsgl_list;
 
 	void *iv;
+	void *state;
 	size_t aead_assoclen;
 
 	struct crypto_wait wait;
@@ -150,11 +151,10 @@ struct af_alg_ctx {
 	size_t used;
 	atomic_t rcvused;
 
-	bool		more:1,
-			merge:1,
-			enc:1,
-			write:1,
-			init:1;
+	bool more;
+	bool merge;
+	bool enc;
+	bool init;
 
 	unsigned int len;
 
@@ -166,7 +166,8 @@ int af_alg_unregister_type(const struct af_alg_type *type);
 
 int af_alg_release(struct socket *sock);
 void af_alg_release_parent(struct sock *sk);
-int af_alg_accept(struct sock *sk, struct socket *newsock, bool kern);
+int af_alg_accept(struct sock *sk, struct socket *newsock,
+		  struct proto_accept_arg *arg);
 
 void af_alg_free_sg(struct af_alg_sgl *sgl);
 

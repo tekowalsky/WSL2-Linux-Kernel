@@ -44,7 +44,7 @@
 #define TEST_ARRAY_BUF_OFFSET \
 	(TEST_NAMED_ARRAY_BUF_OFFSET + 3 + strlen(TEST_ARRAY_NAME) + 1)
 
-MODULE_IMPORT_NS(EXPORTED_FOR_KUNIT_TESTING);
+MODULE_IMPORT_NS("EXPORTED_FOR_KUNIT_TESTING");
 
 struct policy_unpack_fixture {
 	struct aa_ext *e;
@@ -610,4 +610,5 @@ static struct kunit_suite apparmor_policy_unpack_test_module = {
 
 kunit_test_suite(apparmor_policy_unpack_test_module);
 
+MODULE_DESCRIPTION("KUnit tests for AppArmor's policy unpack");
 MODULE_LICENSE("GPL");

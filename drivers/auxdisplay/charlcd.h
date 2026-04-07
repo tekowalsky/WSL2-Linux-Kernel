@@ -36,6 +36,8 @@ enum charlcd_lines {
 	CHARLCD_LINES_2,
 };
 
+struct charlcd_ops;
+
 struct charlcd {
 	const struct charlcd_ops *ops;
 	const unsigned char *char_conv;	/* Optional */
@@ -49,7 +51,7 @@ struct charlcd {
 		unsigned long y;
 	} addr;
 
-	void *drvdata;			/* Set by charlcd_alloc() */
+	void *drvdata;
 };
 
 /**
@@ -93,8 +95,7 @@ struct charlcd_ops {
 };
 
 void charlcd_backlight(struct charlcd *lcd, enum charlcd_onoff on);
-
-struct charlcd *charlcd_alloc(unsigned int drvdata_size);
+struct charlcd *charlcd_alloc(void);
 void charlcd_free(struct charlcd *lcd);
 
 int charlcd_register(struct charlcd *lcd);

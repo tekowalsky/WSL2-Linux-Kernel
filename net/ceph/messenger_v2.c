@@ -733,8 +733,6 @@ static int setup_crypto(struct ceph_connection *con,
 		return ret;
 	}
 
-	WARN_ON((unsigned long)session_key &
-		crypto_shash_alignmask(con->v2.hmac_tfm));
 	ret = crypto_shash_setkey(con->v2.hmac_tfm, session_key,
 				  session_key_len);
 	if (ret) {
@@ -816,8 +814,6 @@ static int hmac_sha256(struct ceph_connection *con, const struct kvec *kvecs,
 		goto out;
 
 	for (i = 0; i < kvec_cnt; i++) {
-		WARN_ON((unsigned long)kvecs[i].iov_base &
-			crypto_shash_alignmask(con->v2.hmac_tfm));
 		ret = crypto_shash_update(desc, kvecs[i].iov_base,
 					  kvecs[i].iov_len);
 		if (ret)
@@ -1091,16 +1087,13 @@ static int decrypt_control_remainder(struct ceph_connection *con)
 static int process_v2_sparse_read(struct ceph_connection *con,
 				  struct page **pages, int spos)
 {
-	struct ceph_msg_data_cursor cursor;
+	struct ceph_msg_data_cursor *cursor = &con->v2.in_cursor;
 	int ret;
-
-	ceph_msg_data_cursor_init(&cursor, con->in_msg,
-				  con->in_msg->sparse_read_total);
 
 	for (;;) {
 		char *buf = NULL;
 
-		ret = con->ops->sparse_read(con, &cursor, &buf);
+		ret = con->ops->sparse_read(con, cursor, &buf);
 		if (ret <= 0)
 			return ret;
 
@@ -1118,11 +1111,11 @@ static int process_v2_sparse_read(struct ceph_connection *con,
 			} else {
 				struct bio_vec bv;
 
-				get_bvec_at(&cursor, &bv);
+				get_bvec_at(cursor, &bv);
 				len = min_t(int, len, bv.bv_len);
 				memcpy_page(bv.bv_page, bv.bv_offset,
 					    spage, soff, len);
-				ceph_msg_data_advance(&cursor, len);
+				ceph_msg_data_advance(cursor, len);
 			}
 			spos += len;
 			ret -= len;
@@ -2409,9 +2402,7 @@ static int process_auth_done(struct ceph_connection *con, void *p, void *end)
 
 	ceph_decode_64_safe(&p, end, global_id, bad);
 	ceph_decode_32_safe(&p, end, con->v2.con_mode, bad);
-
 	ceph_decode_32_safe(&p, end, payload_len, bad);
-	ceph_decode_need(&p, end, payload_len, bad);
 
 	dout("%s con %p global_id %llu con_mode %d payload_len %d\n",
 	     __func__, con, global_id, con->v2.con_mode, payload_len);

@@ -1554,6 +1554,12 @@ static int __tegra_xudc_ep_set_halt(struct tegra_xudc_ep *ep, bool halt)
 		return -ENOTSUPP;
 	}
 
+	if (!!(xudc_readl(xudc, EP_HALT) & BIT(ep->index)) == halt) {
+		dev_dbg(xudc->dev, "EP %u already %s\n", ep->index,
+			halt ? "halted" : "not halted");
+		return 0;
+	}
+
 	if (halt) {
 		ep_halt(xudc, ep->index);
 	} else {
@@ -1743,10 +1749,6 @@ static int __tegra_xudc_ep_disable(struct tegra_xudc_ep *ep)
 		val = xudc_readl(xudc, CTRL);
 		val &= ~CTRL_RUN;
 		xudc_writel(xudc, val, CTRL);
-
-		val = xudc_readl(xudc, ST);
-		if (val & ST_RC)
-			xudc_writel(xudc, ST_RC, ST);
 	}
 
 	dev_info(xudc->dev, "ep %u disabled\n", ep->index);
@@ -4069,7 +4071,7 @@ static const struct dev_pm_ops tegra_xudc_pm_ops = {
 
 static struct platform_driver tegra_xudc_driver = {
 	.probe = tegra_xudc_probe,
-	.remove_new = tegra_xudc_remove,
+	.remove = tegra_xudc_remove,
 	.driver = {
 		.name = "tegra-xudc",
 		.pm = &tegra_xudc_pm_ops,

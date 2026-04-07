@@ -192,6 +192,7 @@ static void hv_irq_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
 	struct pci_dev *dev;
 	struct hv_interrupt_entry out_entry, *stored_entry;
 	struct irq_cfg *cfg = irqd_cfg(data);
+	const cpumask_t *affinity;
 	int cpu;
 	u64 status;
 
@@ -203,14 +204,15 @@ static void hv_irq_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
 		return;
 	}
 
-	cpu = cpumask_first(irq_data_get_effective_affinity_mask(data));
+	affinity = irq_data_get_effective_affinity_mask(data);
+	cpu = cpumask_first_and(affinity, cpu_online_mask);
 
 	if (data->chip_data) {
 		/*
 		 * This interrupt is already mapped. Let's unmap first.
 		 *
 		 * We don't use retarget interrupt hypercalls here because
-		 * Microsoft Hypervisor doens't allow root to change the vector
+		 * Microsoft Hypervisor doesn't allow root to change the vector
 		 * or specify VPs outside of the set that is initially used
 		 * during mapping.
 		 */
@@ -302,7 +304,7 @@ static struct irq_chip hv_pci_msi_controller = {
 	.irq_retrigger		= irq_chip_retrigger_hierarchy,
 	.irq_compose_msi_msg	= hv_irq_compose_msi_msg,
 	.irq_set_affinity	= msi_domain_set_affinity,
-	.flags			= IRQCHIP_SKIP_SET_WAKE,
+	.flags			= IRQCHIP_SKIP_SET_WAKE | IRQCHIP_MOVE_DEFERRED,
 };
 
 static struct msi_domain_ops pci_msi_domain_ops = {

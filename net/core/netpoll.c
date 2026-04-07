@@ -34,7 +34,7 @@
 #include <net/addrconf.h>
 #include <net/ndisc.h>
 #include <net/ip6_checksum.h>
-#include <asm/unaligned.h>
+#include <linux/unaligned.h>
 #include <trace/events/napi.h>
 #include <linux/kconfig.h>
 
@@ -157,7 +157,7 @@ static void poll_one_napi(struct napi_struct *napi)
 	if (test_and_set_bit(NAPI_STATE_NPSVC, &napi->state))
 		return;
 
-	/* We explicilty pass the polling call a budget of 0 to
+	/* We explicitly pass the polling call a budget of 0 to
 	 * indicate that we are clearing the Tx path only.
 	 */
 	work = napi->poll(napi, 0);
@@ -221,7 +221,6 @@ void netpoll_poll_disable(struct net_device *dev)
 	if (ni)
 		down(&ni->dev_lock);
 }
-EXPORT_SYMBOL(netpoll_poll_disable);
 
 void netpoll_poll_enable(struct net_device *dev)
 {
@@ -231,7 +230,6 @@ void netpoll_poll_enable(struct net_device *dev)
 	if (ni)
 		up(&ni->dev_lock);
 }
-EXPORT_SYMBOL(netpoll_poll_enable);
 
 static void refill_skbs(struct netpoll *np)
 {
@@ -397,7 +395,7 @@ netdev_tx_t netpoll_send_skb(struct netpoll *np, struct sk_buff *skb)
 }
 EXPORT_SYMBOL(netpoll_send_skb);
 
-void netpoll_send_udp(struct netpoll *np, const char *msg, int len)
+int netpoll_send_udp(struct netpoll *np, const char *msg, int len)
 {
 	int total_len, ip_len, udp_len;
 	struct sk_buff *skb;
@@ -421,7 +419,7 @@ void netpoll_send_udp(struct netpoll *np, const char *msg, int len)
 	skb = find_skb(np, total_len + np->dev->needed_tailroom,
 		       total_len - len);
 	if (!skb)
-		return;
+		return -ENOMEM;
 
 	skb_copy_to_linear_data(skb, msg, len);
 	skb_put(skb, len);
@@ -497,7 +495,7 @@ void netpoll_send_udp(struct netpoll *np, const char *msg, int len)
 
 	skb->dev = np->dev;
 
-	netpoll_send_skb(np, skb);
+	return (int)netpoll_send_skb(np, skb);
 }
 EXPORT_SYMBOL(netpoll_send_udp);
 
@@ -643,7 +641,8 @@ int __netpoll_setup(struct netpoll *np, struct net_device *ndev)
 		goto out;
 	}
 
-	if (!rcu_access_pointer(ndev->npinfo)) {
+	npinfo = rtnl_dereference(ndev->npinfo);
+	if (!npinfo) {
 		npinfo = kmalloc(sizeof(*npinfo), GFP_KERNEL);
 		if (!npinfo) {
 			err = -ENOMEM;
@@ -658,12 +657,11 @@ int __netpoll_setup(struct netpoll *np, struct net_device *ndev)
 
 		ops = ndev->netdev_ops;
 		if (ops->ndo_netpoll_setup) {
-			err = ops->ndo_netpoll_setup(ndev, npinfo);
+			err = ops->ndo_netpoll_setup(ndev);
 			if (err)
 				goto free_npinfo;
 		}
 	} else {
-		npinfo = rtnl_dereference(ndev->npinfo);
 		refcount_inc(&npinfo->refcnt);
 	}
 
@@ -796,13 +794,6 @@ put_noaddr:
 	if (err)
 		goto flush;
 	rtnl_unlock();
-
-	/* Make sure all NAPI polls which started before dev->npinfo
-	 * was visible have exited before we start calling NAPI poll.
-	 * NAPI skips locking if dev->npinfo is NULL.
-	 */
-	synchronize_rcu();
-
 	return 0;
 
 flush:
@@ -843,10 +834,6 @@ void __netpoll_cleanup(struct netpoll *np)
 	if (!npinfo)
 		return;
 
-	/* At this point, there is a single npinfo instance per netdevice, and
-	 * its refcnt tracks how many netpoll structures are linked to it. We
-	 * only perform npinfo cleanup when the refcnt decrements to zero.
-	 */
 	if (refcount_dec_and_test(&npinfo->refcnt)) {
 		const struct net_device_ops *ops;
 
@@ -856,7 +843,8 @@ void __netpoll_cleanup(struct netpoll *np)
 
 		RCU_INIT_POINTER(np->dev->npinfo, NULL);
 		call_rcu(&npinfo->rcu, rcu_cleanup_netpoll_info);
-	}
+	} else
+		RCU_INIT_POINTER(np->dev->npinfo, NULL);
 
 	skb_pool_flush(np);
 }
@@ -873,14 +861,20 @@ void __netpoll_free(struct netpoll *np)
 }
 EXPORT_SYMBOL_GPL(__netpoll_free);
 
+void do_netpoll_cleanup(struct netpoll *np)
+{
+	__netpoll_cleanup(np);
+	netdev_put(np->dev, &np->dev_tracker);
+	np->dev = NULL;
+}
+EXPORT_SYMBOL(do_netpoll_cleanup);
+
 void netpoll_cleanup(struct netpoll *np)
 {
 	rtnl_lock();
 	if (!np->dev)
 		goto out;
-	__netpoll_cleanup(np);
-	netdev_put(np->dev, &np->dev_tracker);
-	np->dev = NULL;
+	do_netpoll_cleanup(np);
 out:
 	rtnl_unlock();
 }

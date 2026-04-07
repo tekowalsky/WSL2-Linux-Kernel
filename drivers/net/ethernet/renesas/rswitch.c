@@ -17,6 +17,7 @@
 #include <linux/of_net.h>
 #include <linux/phy/phy.h>
 #include <linux/platform_device.h>
+#include <linux/pm.h>
 #include <linux/pm_runtime.h>
 #include <linux/rtnetlink.h>
 #include <linux/slab.h>
@@ -110,25 +111,35 @@ static void rswitch_top_init(struct rswitch_private *priv)
 /* Forwarding engine block (MFWD) */
 static void rswitch_fwd_init(struct rswitch_private *priv)
 {
+	u32 all_ports_mask = GENMASK(RSWITCH_NUM_AGENTS - 1, 0);
 	unsigned int i;
 
-	/* For ETHA */
-	for (i = 0; i < RSWITCH_NUM_PORTS; i++) {
-		iowrite32(FWPC0_DEFAULT, priv->addr + FWPC0(i));
+	/* Start with empty configuration */
+	for (i = 0; i < RSWITCH_NUM_AGENTS; i++) {
+		/* Disable all port features */
+		iowrite32(0, priv->addr + FWPC0(i));
+		/* Disallow L3 forwarding and direct descriptor forwarding */
+		iowrite32(FIELD_PREP(FWCP1_LTHFW, all_ports_mask),
+			  priv->addr + FWPC1(i));
+		/* Disallow L2 forwarding */
+		iowrite32(FIELD_PREP(FWCP2_LTWFW, all_ports_mask),
+			  priv->addr + FWPC2(i));
+		/* Disallow port based forwarding */
 		iowrite32(0, priv->addr + FWPBFC(i));
 	}
 
-	for (i = 0; i < RSWITCH_NUM_PORTS; i++) {
+	/* For enabled ETHA ports, setup port based forwarding */
+	rswitch_for_each_enabled_port(priv, i) {
+		/* Port based forwarding from port i to GWCA port */
+		rswitch_modify(priv->addr, FWPBFC(i), FWPBFC_PBDV,
+			       FIELD_PREP(FWPBFC_PBDV, BIT(priv->gwca.index)));
+		/* Within GWCA port, forward to Rx queue for port i */
 		iowrite32(priv->rdev[i]->rx_queue->index,
 			  priv->addr + FWPBFCSDC(GWCA_INDEX, i));
-		iowrite32(BIT(priv->gwca.index), priv->addr + FWPBFC(i));
 	}
 
-	/* For GWCA */
-	iowrite32(FWPC0_DEFAULT, priv->addr + FWPC0(priv->gwca.index));
-	iowrite32(FWPC1_DDE, priv->addr + FWPC1(priv->gwca.index));
-	iowrite32(0, priv->addr + FWPBFC(priv->gwca.index));
-	iowrite32(GENMASK(RSWITCH_NUM_PORTS - 1, 0), priv->addr + FWPBFC(priv->gwca.index));
+	/* For GWCA port, allow direct descriptor forwarding */
+	rswitch_modify(priv->addr, FWPC1(priv->gwca.index), FWPC1_DDE, FWPC1_DDE);
 }
 
 /* Gateway CPU agent block (GWCA) */
@@ -666,6 +677,8 @@ static int rswitch_gwca_hw_init(struct rswitch_private *priv)
 	iowrite32(upper_32_bits(priv->gwca.linkfix_table_dma), priv->addr + GWDCBAC0);
 	iowrite32(lower_32_bits(priv->gwca.ts_queue.ring_dma), priv->addr + GWTDCAC10);
 	iowrite32(upper_32_bits(priv->gwca.ts_queue.ring_dma), priv->addr + GWTDCAC00);
+	iowrite32(GWMDNC_TSDMN(1) | GWMDNC_TXDMN(0x1e) | GWMDNC_RXDMN(0x1f),
+		  priv->addr + GWMDNC);
 	iowrite32(GWCA_TS_IRQ_BIT, priv->addr + GWTSDCC0);
 
 	iowrite32(GWTPC_PPPL(GWCA_IPV_NUM), priv->addr + GWTPC0);
@@ -710,6 +723,80 @@ static int rswitch_gwca_halt(struct rswitch_private *priv)
 	return err;
 }
 
+static struct sk_buff *rswitch_rx_handle_desc(struct net_device *ndev,
+					      struct rswitch_gwca_queue *gq,
+					      struct rswitch_ext_ts_desc *desc)
+{
+	dma_addr_t dma_addr = rswitch_desc_get_dptr(&desc->desc);
+	u16 pkt_len = le16_to_cpu(desc->desc.info_ds) & RX_DS;
+	u8 die_dt = desc->desc.die_dt & DT_MASK;
+	struct sk_buff *skb = NULL;
+
+	dma_unmap_single(ndev->dev.parent, dma_addr, RSWITCH_MAP_BUF_SIZE,
+			 DMA_FROM_DEVICE);
+
+	/* The RX descriptor order will be one of the following:
+	 * - FSINGLE
+	 * - FSTART -> FEND
+	 * - FSTART -> FMID -> FEND
+	 */
+
+	/* Check whether the descriptor is unexpected order */
+	switch (die_dt) {
+	case DT_FSTART:
+	case DT_FSINGLE:
+		if (gq->skb_fstart) {
+			dev_kfree_skb_any(gq->skb_fstart);
+			gq->skb_fstart = NULL;
+			ndev->stats.rx_dropped++;
+		}
+		break;
+	case DT_FMID:
+	case DT_FEND:
+		if (!gq->skb_fstart) {
+			ndev->stats.rx_dropped++;
+			return NULL;
+		}
+		break;
+	default:
+		break;
+	}
+
+	/* Handle the descriptor */
+	switch (die_dt) {
+	case DT_FSTART:
+	case DT_FSINGLE:
+		skb = build_skb(gq->rx_bufs[gq->cur], RSWITCH_BUF_SIZE);
+		if (skb) {
+			skb_reserve(skb, RSWITCH_HEADROOM);
+			skb_put(skb, pkt_len);
+			gq->pkt_len = pkt_len;
+			if (die_dt == DT_FSTART) {
+				gq->skb_fstart = skb;
+				skb = NULL;
+			}
+		}
+		break;
+	case DT_FMID:
+	case DT_FEND:
+		skb_add_rx_frag(gq->skb_fstart, skb_shinfo(gq->skb_fstart)->nr_frags,
+				virt_to_page(gq->rx_bufs[gq->cur]),
+				offset_in_page(gq->rx_bufs[gq->cur]) + RSWITCH_HEADROOM,
+				pkt_len, RSWITCH_BUF_SIZE);
+		if (die_dt == DT_FEND) {
+			skb = gq->skb_fstart;
+			gq->skb_fstart = NULL;
+		}
+		gq->pkt_len += pkt_len;
+		break;
+	default:
+		netdev_err(ndev, "%s: unexpected value (%x)\n", __func__, die_dt);
+		break;
+	}
+
+	return skb;
+}
+
 static bool rswitch_rx(struct net_device *ndev, int *quota)
 {
 	struct rswitch_device *rdev = netdev_priv(ndev);
@@ -717,9 +804,7 @@ static bool rswitch_rx(struct net_device *ndev, int *quota)
 	struct rswitch_ext_ts_desc *desc;
 	int limit, boguscnt, ret;
 	struct sk_buff *skb;
-	dma_addr_t dma_addr;
 	unsigned int num;
-	u16 pkt_len;
 	u32 get_ts;
 
 	if (*quota <= 0)
@@ -731,15 +816,9 @@ static bool rswitch_rx(struct net_device *ndev, int *quota)
 	desc = &gq->rx_ring[gq->cur];
 	while ((desc->desc.die_dt & DT_MASK) != DT_FEMPTY) {
 		dma_rmb();
-		pkt_len = le16_to_cpu(desc->desc.info_ds) & RX_DS;
-		dma_addr = rswitch_desc_get_dptr(&desc->desc);
-		dma_unmap_single(ndev->dev.parent, dma_addr,
-				 RSWITCH_MAP_BUF_SIZE, DMA_FROM_DEVICE);
-		skb = build_skb(gq->rx_bufs[gq->cur], RSWITCH_BUF_SIZE);
+		skb = rswitch_rx_handle_desc(ndev, gq, desc);
 		if (!skb)
 			goto out;
-		skb_reserve(skb, RSWITCH_HEADROOM);
-		skb_put(skb, pkt_len);
 
 		get_ts = rdev->priv->ptp_priv->tstamp_rx_ctrl & RCAR_GEN4_RXTSTAMP_TYPE_V2_L2_EVENT;
 		if (get_ts) {
@@ -755,7 +834,7 @@ static bool rswitch_rx(struct net_device *ndev, int *quota)
 		skb->protocol = eth_type_trans(skb, ndev);
 		napi_gro_receive(&rdev->napi, skb);
 		rdev->ndev->stats.rx_packets++;
-		rdev->ndev->stats.rx_bytes += pkt_len;
+		rdev->ndev->stats.rx_bytes += gq->pkt_len;
 
 out:
 		gq->rx_bufs[gq->cur] = NULL;
@@ -1090,9 +1169,9 @@ static void rswitch_rmac_setting(struct rswitch_etha *etha, const u8 *mac)
 
 static void rswitch_etha_enable_mii(struct rswitch_etha *etha)
 {
-	rswitch_modify(etha->addr, MPIC, MPIC_PSMCS_MASK | MPIC_PSMHT_MASK,
-		       MPIC_PSMCS(etha->psmcs) | MPIC_PSMHT(0x06));
-	rswitch_modify(etha->addr, MPSM, 0, MPSM_MFF_C45);
+	rswitch_modify(etha->addr, MPIC, MPIC_PSMCS | MPIC_PSMHT,
+		       FIELD_PREP(MPIC_PSMCS, etha->psmcs) |
+		       FIELD_PREP(MPIC_PSMHT, 0x06));
 }
 
 static int rswitch_etha_hw_init(struct rswitch_etha *etha, const u8 *mac)
@@ -1121,42 +1200,29 @@ static int rswitch_etha_hw_init(struct rswitch_etha *etha, const u8 *mac)
 	return rswitch_etha_change_mode(etha, EAMC_OPC_OPERATION);
 }
 
-static int rswitch_etha_set_access(struct rswitch_etha *etha, bool read,
-				   int phyad, int devad, int regad, int data)
+static int rswitch_etha_mpsm_op(struct rswitch_etha *etha, bool read,
+				unsigned int mmf, unsigned int pda,
+				unsigned int pra, unsigned int pop,
+				unsigned int prd)
 {
-	int pop = read ? MDIO_READ_C45 : MDIO_WRITE_C45;
 	u32 val;
 	int ret;
 
-	if (devad == 0xffffffff)
-		return -ENODEV;
+	val = MPSM_PSME |
+	      FIELD_PREP(MPSM_MFF, mmf) |
+	      FIELD_PREP(MPSM_PDA, pda) |
+	      FIELD_PREP(MPSM_PRA, pra) |
+	      FIELD_PREP(MPSM_POP, pop) |
+	      FIELD_PREP(MPSM_PRD, prd);
+	iowrite32(val, etha->addr + MPSM);
 
-	writel(MMIS1_CLEAR_FLAGS, etha->addr + MMIS1);
-
-	val = MPSM_PSME | MPSM_MFF_C45;
-	iowrite32((regad << 16) | (devad << 8) | (phyad << 3) | val, etha->addr + MPSM);
-
-	ret = rswitch_reg_wait(etha->addr, MMIS1, MMIS1_PAACS, MMIS1_PAACS);
+	ret = rswitch_reg_wait(etha->addr, MPSM, MPSM_PSME, 0);
 	if (ret)
 		return ret;
 
-	rswitch_modify(etha->addr, MMIS1, MMIS1_PAACS, MMIS1_PAACS);
-
 	if (read) {
-		writel((pop << 13) | (devad << 8) | (phyad << 3) | val, etha->addr + MPSM);
-
-		ret = rswitch_reg_wait(etha->addr, MMIS1, MMIS1_PRACS, MMIS1_PRACS);
-		if (ret)
-			return ret;
-
-		ret = (ioread32(etha->addr + MPSM) & MPSM_PRD_MASK) >> 16;
-
-		rswitch_modify(etha->addr, MMIS1, MMIS1_PRACS, MMIS1_PRACS);
-	} else {
-		iowrite32((data << 16) | (pop << 13) | (devad << 8) | (phyad << 3) | val,
-			  etha->addr + MPSM);
-
-		ret = rswitch_reg_wait(etha->addr, MMIS1, MMIS1_PWACS, MMIS1_PWACS);
+		val = ioread32(etha->addr + MPSM);
+		ret = FIELD_GET(MPSM_PRD, val);
 	}
 
 	return ret;
@@ -1166,16 +1232,47 @@ static int rswitch_etha_mii_read_c45(struct mii_bus *bus, int addr, int devad,
 				     int regad)
 {
 	struct rswitch_etha *etha = bus->priv;
+	int ret;
 
-	return rswitch_etha_set_access(etha, true, addr, devad, regad, 0);
+	ret = rswitch_etha_mpsm_op(etha, false, MPSM_MMF_C45, addr, devad,
+				   MPSM_POP_ADDRESS, regad);
+	if (ret)
+		return ret;
+
+	return rswitch_etha_mpsm_op(etha, true, MPSM_MMF_C45, addr, devad,
+				    MPSM_POP_READ_C45, 0);
 }
 
 static int rswitch_etha_mii_write_c45(struct mii_bus *bus, int addr, int devad,
 				      int regad, u16 val)
 {
 	struct rswitch_etha *etha = bus->priv;
+	int ret;
 
-	return rswitch_etha_set_access(etha, false, addr, devad, regad, val);
+	ret = rswitch_etha_mpsm_op(etha, false, MPSM_MMF_C45, addr, devad,
+				   MPSM_POP_ADDRESS, regad);
+	if (ret)
+		return ret;
+
+	return rswitch_etha_mpsm_op(etha, false, MPSM_MMF_C45, addr, devad,
+				    MPSM_POP_WRITE, val);
+}
+
+static int rswitch_etha_mii_read_c22(struct mii_bus *bus, int phyad, int regad)
+{
+	struct rswitch_etha *etha = bus->priv;
+
+	return rswitch_etha_mpsm_op(etha, true, MPSM_MMF_C22, phyad, regad,
+				    MPSM_POP_READ_C22, 0);
+}
+
+static int rswitch_etha_mii_write_c22(struct mii_bus *bus, int phyad,
+				      int regad, u16 val)
+{
+	struct rswitch_etha *etha = bus->priv;
+
+	return rswitch_etha_mpsm_op(etha, false, MPSM_MMF_C22, phyad, regad,
+				    MPSM_POP_WRITE, val);
 }
 
 /* Call of_node_put(port) after done */
@@ -1260,6 +1357,8 @@ static int rswitch_mii_register(struct rswitch_device *rdev)
 	mii_bus->priv = rdev->etha;
 	mii_bus->read_c45 = rswitch_etha_mii_read_c45;
 	mii_bus->write_c45 = rswitch_etha_mii_write_c45;
+	mii_bus->read = rswitch_etha_mii_read_c22;
+	mii_bus->write = rswitch_etha_mii_write_c22;
 	mii_bus->parent = &rdev->priv->pdev->dev;
 
 	mdio_np = of_get_child_by_name(rdev->np_port, "mdio");
@@ -1356,6 +1455,7 @@ static int rswitch_phy_device_init(struct rswitch_device *rdev)
 	if (!phydev)
 		goto out;
 	__set_bit(rdev->etha->phy_interface, phydev->host_interfaces);
+	phydev->mac_managed_pm = true;
 
 	phydev = of_phy_connect(rdev->ndev, phy, rswitch_adjust_link, 0,
 				rdev->etha->phy_interface);
@@ -1446,7 +1546,8 @@ static void rswitch_ether_port_deinit_one(struct rswitch_device *rdev)
 
 static int rswitch_ether_port_init_all(struct rswitch_private *priv)
 {
-	int i, err;
+	unsigned int i;
+	int err;
 
 	rswitch_for_each_enabled_port(priv, i) {
 		err = rswitch_ether_port_init_one(priv->rdev[i]);
@@ -1478,7 +1579,7 @@ static void rswitch_ether_port_deinit_all(struct rswitch_private *priv)
 {
 	unsigned int i;
 
-	for (i = 0; i < RSWITCH_NUM_PORTS; i++) {
+	rswitch_for_each_enabled_port(priv, i) {
 		phy_exit(priv->rdev[i]->serdes);
 		rswitch_ether_port_deinit_one(priv->rdev[i]);
 	}
@@ -1762,14 +1863,12 @@ static const struct net_device_ops rswitch_netdev_ops = {
 	.ndo_set_mac_address = eth_mac_addr,
 };
 
-static int rswitch_get_ts_info(struct net_device *ndev, struct ethtool_ts_info *info)
+static int rswitch_get_ts_info(struct net_device *ndev, struct kernel_ethtool_ts_info *info)
 {
 	struct rswitch_device *rdev = netdev_priv(ndev);
 
 	info->phc_index = ptp_clock_index(rdev->priv->ptp_priv->clock);
 	info->so_timestamping = SOF_TIMESTAMPING_TX_SOFTWARE |
-				SOF_TIMESTAMPING_RX_SOFTWARE |
-				SOF_TIMESTAMPING_SOFTWARE |
 				SOF_TIMESTAMPING_TX_HARDWARE |
 				SOF_TIMESTAMPING_RX_HARDWARE |
 				SOF_TIMESTAMPING_RAW_HARDWARE;
@@ -1836,6 +1935,8 @@ static int rswitch_device_alloc(struct rswitch_private *priv, unsigned int index
 	snprintf(ndev->name, IFNAMSIZ, "tsn%d", index);
 	ndev->netdev_ops = &rswitch_netdev_ops;
 	ndev->ethtool_ops = &rswitch_ethtool_ops;
+	ndev->max_mtu = RSWITCH_MAX_MTU;
+	ndev->min_mtu = ETH_MIN_MTU;
 
 	netif_napi_add(ndev, &rdev->napi, rswitch_poll);
 
@@ -1852,9 +1953,6 @@ static int rswitch_device_alloc(struct rswitch_private *priv, unsigned int index
 	err = rswitch_etha_get_params(rdev);
 	if (err < 0)
 		goto out_get_params;
-
-	if (rdev->priv->gwca.speed < rdev->etha->speed)
-		rdev->priv->gwca.speed = rdev->etha->speed;
 
 	err = rswitch_rxdmac_alloc(ndev);
 	if (err < 0)
@@ -1892,7 +1990,8 @@ static void rswitch_device_free(struct rswitch_private *priv, unsigned int index
 
 static int rswitch_init(struct rswitch_private *priv)
 {
-	int i, err;
+	unsigned int i;
+	int err;
 
 	for (i = 0; i < RSWITCH_NUM_PORTS; i++)
 		rswitch_etha_init(priv, i);
@@ -1922,7 +2021,7 @@ static int rswitch_init(struct rswitch_private *priv)
 	for (i = 0; i < RSWITCH_NUM_PORTS; i++) {
 		err = rswitch_device_alloc(priv, i);
 		if (err < 0) {
-			for (i--; i >= 0; i--)
+			for (; i-- > 0; )
 				rswitch_device_free(priv, i);
 			goto err_device_alloc;
 		}
@@ -1930,8 +2029,8 @@ static int rswitch_init(struct rswitch_private *priv)
 
 	rswitch_fwd_init(priv);
 
-	err = rcar_gen4_ptp_register(priv->ptp_priv, RCAR_GEN4_PTP_REG_LAYOUT_S4,
-				     RCAR_GEN4_PTP_CLOCK_S4);
+	err = rcar_gen4_ptp_register(priv->ptp_priv, RCAR_GEN4_PTP_REG_LAYOUT,
+				     clk_get_rate(priv->clk));
 	if (err < 0)
 		goto err_ptp_register;
 
@@ -2065,7 +2164,7 @@ static int renesas_eth_sw_probe(struct platform_device *pdev)
 
 static void rswitch_deinit(struct rswitch_private *priv)
 {
-	int i;
+	unsigned int i;
 
 	rswitch_gwca_hw_deinit(priv);
 	rcar_gen4_ptp_unregister(priv->ptp_priv);
@@ -2087,7 +2186,7 @@ static void rswitch_deinit(struct rswitch_private *priv)
 	rswitch_clock_disable(priv);
 }
 
-static int renesas_eth_sw_remove(struct platform_device *pdev)
+static void renesas_eth_sw_remove(struct platform_device *pdev)
 {
 	struct rswitch_private *priv = platform_get_drvdata(pdev);
 
@@ -2097,15 +2196,54 @@ static int renesas_eth_sw_remove(struct platform_device *pdev)
 	pm_runtime_disable(&pdev->dev);
 
 	platform_set_drvdata(pdev, NULL);
+}
+
+static int renesas_eth_sw_suspend(struct device *dev)
+{
+	struct rswitch_private *priv = dev_get_drvdata(dev);
+	struct net_device *ndev;
+	unsigned int i;
+
+	rswitch_for_each_enabled_port(priv, i) {
+		ndev = priv->rdev[i]->ndev;
+		if (netif_running(ndev)) {
+			netif_device_detach(ndev);
+			rswitch_stop(ndev);
+		}
+		if (priv->rdev[i]->serdes->init_count)
+			phy_exit(priv->rdev[i]->serdes);
+	}
 
 	return 0;
 }
+
+static int renesas_eth_sw_resume(struct device *dev)
+{
+	struct rswitch_private *priv = dev_get_drvdata(dev);
+	struct net_device *ndev;
+	unsigned int i;
+
+	rswitch_for_each_enabled_port(priv, i) {
+		phy_init(priv->rdev[i]->serdes);
+		ndev = priv->rdev[i]->ndev;
+		if (netif_running(ndev)) {
+			rswitch_open(ndev);
+			netif_device_attach(ndev);
+		}
+	}
+
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(renesas_eth_sw_pm_ops, renesas_eth_sw_suspend,
+				renesas_eth_sw_resume);
 
 static struct platform_driver renesas_eth_sw_driver_platform = {
 	.probe = renesas_eth_sw_probe,
 	.remove = renesas_eth_sw_remove,
 	.driver = {
 		.name = "renesas_eth_sw",
+		.pm = pm_sleep_ptr(&renesas_eth_sw_pm_ops),
 		.of_match_table = renesas_eth_sw_of_table,
 	}
 };

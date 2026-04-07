@@ -37,11 +37,6 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
 	int err;
 
 	if (netif_is_bridge_master(dev)) {
-		struct net_bridge *br = netdev_priv(dev);
-
-		if (event == NETDEV_REGISTER)
-			br_fdb_change_mac_address(br, dev->dev_addr);
-
 		err = br_vlan_bridge_event(dev, event, ptr);
 		if (err)
 			return notifier_from_errno(err);
@@ -54,6 +49,13 @@ static int br_device_event(struct notifier_block *unused, unsigned long event, v
 
 			return NOTIFY_DONE;
 		}
+	}
+
+	if (is_vlan_dev(dev)) {
+		struct net_device *real_dev = vlan_dev_real_dev(dev);
+
+		if (netif_is_bridge_master(real_dev))
+			br_vlan_vlan_upper_event(real_dev, dev, event);
 	}
 
 	/* not a port of a bridge */
@@ -317,13 +319,6 @@ int br_boolopt_multi_toggle(struct net_bridge *br,
 	int err = 0;
 	int opt_id;
 
-	opt_id = find_next_bit(&bitmap, BITS_PER_LONG, BR_BOOLOPT_MAX);
-	if (opt_id != BITS_PER_LONG) {
-		NL_SET_ERR_MSG_FMT_MOD(extack, "Unknown boolean option %d",
-				       opt_id);
-		return -EINVAL;
-	}
-
 	for_each_set_bit(opt_id, &bitmap, BR_BOOLOPT_MAX) {
 		bool on = !!(bm->optval & BIT(opt_id));
 
@@ -368,26 +363,21 @@ void br_opt_toggle(struct net_bridge *br, enum net_bridge_opts opt, bool on)
 		clear_bit(opt, &br->options);
 }
 
-static void __net_exit br_net_exit_batch(struct list_head *net_list)
+static void __net_exit br_net_exit_batch_rtnl(struct list_head *net_list,
+					      struct list_head *dev_to_kill)
 {
 	struct net_device *dev;
 	struct net *net;
-	LIST_HEAD(list);
 
-	rtnl_lock();
-
+	ASSERT_RTNL();
 	list_for_each_entry(net, net_list, exit_list)
 		for_each_netdev(net, dev)
 			if (netif_is_bridge_master(dev))
-				br_dev_delete(dev, &list);
-
-	unregister_netdevice_many(&list);
-
-	rtnl_unlock();
+				br_dev_delete(dev, dev_to_kill);
 }
 
 static struct pernet_operations br_net_ops = {
-	.exit_batch	= br_net_exit_batch,
+	.exit_batch_rtnl = br_net_exit_batch_rtnl,
 };
 
 static const struct stp_proto br_stp_proto = {
@@ -489,3 +479,4 @@ module_exit(br_deinit)
 MODULE_LICENSE("GPL");
 MODULE_VERSION(BR_VERSION);
 MODULE_ALIAS_RTNL_LINK("bridge");
+MODULE_DESCRIPTION("Ethernet bridge driver");

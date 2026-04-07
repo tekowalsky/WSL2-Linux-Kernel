@@ -20,12 +20,15 @@
 #include <linux/sched/task_stack.h>
 #include <linux/panic_notifier.h>
 #include <linux/ptrace.h>
+#include <linux/random.h>
+#include <linux/efi.h>
 #include <linux/kdebug.h>
 #include <linux/kmsg_dump.h>
+#include <linux/sizes.h>
 #include <linux/slab.h>
 #include <linux/dma-map-ops.h>
 #include <linux/set_memory.h>
-#include <asm/hyperv-tlfs.h>
+#include <hyperv/hvhdk.h>
 #include <asm/mshyperv.h>
 
 /*
@@ -138,7 +141,7 @@ static int sysctl_record_panic_msg = 1;
  * sysctl option to allow the user to control whether kmsg data should be
  * reported to Hyper-V on panic.
  */
-static struct ctl_table hv_ctl_table[] = {
+static const struct ctl_table hv_ctl_table[] = {
 	{
 		.procname	= "hyperv_record_panic_msg",
 		.data		= &sysctl_record_panic_msg,
@@ -148,7 +151,6 @@ static struct ctl_table hv_ctl_table[] = {
 		.extra1		= SYSCTL_ZERO,
 		.extra2		= SYSCTL_ONE
 	},
-	{}
 };
 
 static int hv_die_panic_notify_crash(struct notifier_block *self,
@@ -205,26 +207,24 @@ static int hv_die_panic_notify_crash(struct notifier_block *self,
  * buffer and call into Hyper-V to transfer the data.
  */
 static void hv_kmsg_dump(struct kmsg_dumper *dumper,
-			 enum kmsg_dump_reason reason)
+			 struct kmsg_dump_detail *detail)
 {
 	struct kmsg_dump_iter iter;
 	size_t bytes_written;
 
 	/* We are only interested in panics. */
-	if (reason != KMSG_DUMP_PANIC || !sysctl_record_panic_msg)
+	if (detail->reason != KMSG_DUMP_PANIC || !sysctl_record_panic_msg)
 		return;
 
 	/*
 	 * Write dump contents to the page. No need to synchronize; panic should
-	 * be single-threaded. Ignore failures from kmsg_dump_get_buffer() since
-	 * panic notification should be done even if there is no message data.
-	 * Don't assume bytes_written is set in case of failure, so initialize it.
+	 * be single-threaded.
 	 */
 	kmsg_dump_rewind(&iter);
-	bytes_written = 0;
-	(void)kmsg_dump_get_buffer(&iter, false, hv_panic_page, HV_HYP_PAGE_SIZE,
+	kmsg_dump_get_buffer(&iter, false, hv_panic_page, HV_HYP_PAGE_SIZE,
 			     &bytes_written);
-
+	if (!bytes_written)
+		return;
 	/*
 	 * P3 to contain the physical address of the panic page & P4 to
 	 * contain the size of the panic data in that page. Rest of the
@@ -233,7 +233,7 @@ static void hv_kmsg_dump(struct kmsg_dumper *dumper,
 	hv_set_msr(HV_MSR_CRASH_P0, 0);
 	hv_set_msr(HV_MSR_CRASH_P1, 0);
 	hv_set_msr(HV_MSR_CRASH_P2, 0);
-	hv_set_msr(HV_MSR_CRASH_P3, bytes_written ? virt_to_phys(hv_panic_page) : 0);
+	hv_set_msr(HV_MSR_CRASH_P3, virt_to_phys(hv_panic_page));
 	hv_set_msr(HV_MSR_CRASH_P4, bytes_written);
 
 	/*
@@ -276,6 +276,11 @@ static void hv_kmsg_dump_register(void)
 		hv_free_hyperv_page(hv_panic_page);
 		hv_panic_page = NULL;
 	}
+}
+
+static inline bool hv_output_page_exists(void)
+{
+	return hv_root_partition || IS_ENABLED(CONFIG_HYPERV_VTL_MODE);
 }
 
 int __init hv_common_init(void)
@@ -340,22 +345,88 @@ int __init hv_common_init(void)
 	BUG_ON(!hyperv_pcpu_input_arg);
 
 	/* Allocate the per-CPU state for output arg for root */
-	if (hv_root_partition) {
+	if (hv_output_page_exists()) {
 		hyperv_pcpu_output_arg = alloc_percpu(void *);
 		BUG_ON(!hyperv_pcpu_output_arg);
 	}
 
-	hv_vp_index = kmalloc_array(num_possible_cpus(), sizeof(*hv_vp_index),
+	hv_vp_index = kmalloc_array(nr_cpu_ids, sizeof(*hv_vp_index),
 				    GFP_KERNEL);
 	if (!hv_vp_index) {
 		hv_common_free();
 		return -ENOMEM;
 	}
 
-	for (i = 0; i < num_possible_cpus(); i++)
+	for (i = 0; i < nr_cpu_ids; i++)
 		hv_vp_index[i] = VP_INVAL;
 
 	return 0;
+}
+
+void __init ms_hyperv_late_init(void)
+{
+	struct acpi_table_header *header;
+	acpi_status status;
+	u8 *randomdata;
+	u32 length, i;
+
+	/*
+	 * Seed the Linux random number generator with entropy provided by
+	 * the Hyper-V host in ACPI table OEM0.
+	 */
+	if (!IS_ENABLED(CONFIG_ACPI))
+		return;
+
+	status = acpi_get_table("OEM0", 0, &header);
+	if (ACPI_FAILURE(status) || !header)
+		return;
+
+	/*
+	 * Since the "OEM0" table name is for OEM specific usage, verify
+	 * that what we're seeing purports to be from Microsoft.
+	 */
+	if (strncmp(header->oem_table_id, "MICROSFT", 8))
+		goto error;
+
+	/*
+	 * Ensure the length is reasonable. Requiring at least 8 bytes and
+	 * no more than 4K bytes is somewhat arbitrary and just protects
+	 * against a malformed table. Hyper-V currently provides 64 bytes,
+	 * but allow for a change in a later version.
+	 */
+	if (header->length < sizeof(*header) + 8 ||
+	    header->length > sizeof(*header) + SZ_4K)
+		goto error;
+
+	length = header->length - sizeof(*header);
+	randomdata = (u8 *)(header + 1);
+
+	pr_debug("Hyper-V: Seeding rng with %d random bytes from ACPI table OEM0\n",
+			length);
+
+	add_bootloader_randomness(randomdata, length);
+
+	/*
+	 * To prevent the seed data from being visible in /sys/firmware/acpi,
+	 * zero out the random data in the ACPI table and fixup the checksum.
+	 * The zero'ing is done out of an abundance of caution in avoiding
+	 * potential security risks to the rng. Similarly, reset the table
+	 * length to just the header size so that a subsequent kexec doesn't
+	 * try to use the zero'ed out random data.
+	 */
+	for (i = 0; i < length; i++) {
+		header->checksum += randomdata[i];
+		randomdata[i] = 0;
+	}
+
+	for (i = 0; i < sizeof(header->length); i++)
+		header->checksum += ((u8 *)&header->length)[i];
+	header->length = sizeof(*header);
+	for (i = 0; i < sizeof(header->length); i++)
+		header->checksum -= ((u8 *)&header->length)[i];
+
+error:
+	acpi_put_table(header);
 }
 
 /*
@@ -369,7 +440,7 @@ int hv_common_cpu_init(unsigned int cpu)
 	void **inputarg, **outputarg;
 	u64 msr_vp_index;
 	gfp_t flags;
-	int pgcount = hv_root_partition ? 2 : 1;
+	const int pgcount = hv_output_page_exists() ? 2 : 1;
 	void *mem;
 	int ret;
 
@@ -387,7 +458,7 @@ int hv_common_cpu_init(unsigned int cpu)
 		if (!mem)
 			return -ENOMEM;
 
-		if (hv_root_partition) {
+		if (hv_output_page_exists()) {
 			outputarg = (void **)this_cpu_ptr(hyperv_pcpu_output_arg);
 			*outputarg = (char *)mem + HV_HYP_PAGE_SIZE;
 		}
@@ -495,11 +566,7 @@ EXPORT_SYMBOL_GPL(hv_query_ext_cap);
 
 void hv_setup_dma_ops(struct device *dev, bool coherent)
 {
-	/*
-	 * Hyper-V does not offer a vIOMMU in the guest
-	 * VM, so pass 0/NULL for the IOMMU settings
-	 */
-	arch_setup_dma_ops(dev, 0, 0, NULL, coherent);
+	arch_setup_dma_ops(dev, coherent);
 }
 EXPORT_SYMBOL_GPL(hv_setup_dma_ops);
 

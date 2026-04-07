@@ -277,9 +277,7 @@ static void virt_wifi_connect_complete(struct work_struct *work)
 		priv->is_connected = true;
 
 	/* Schedules an event that acquires the rtnl lock. */
-	cfg80211_connect_result(priv->upperdev,
-				priv->is_connected ? fake_router_bssid : NULL,
-				NULL, 0, NULL, 0,
+	cfg80211_connect_result(priv->upperdev, requested_bss, NULL, 0, NULL, 0,
 				status, GFP_KERNEL);
 	netif_carrier_on(priv->upperdev);
 }
@@ -469,7 +467,7 @@ static int virt_wifi_net_device_get_iflink(const struct net_device *dev)
 {
 	struct virt_wifi_netdev_priv *priv = netdev_priv(dev);
 
-	return priv->lowerdev->ifindex;
+	return READ_ONCE(priv->lowerdev->ifindex);
 }
 
 static const struct net_device_ops virt_wifi_ops = {

@@ -22,9 +22,8 @@
 #define SECOND_BYTE_OPCODE_UD2	0x0b
 
 #define BUG_NONE		0xffff
-#define BUG_UD2			0xfffe
-#define BUG_UD1			0xfffd
-#define BUG_UD1_UBSAN		0xfffc
+#define BUG_UD1			0xfffe
+#define BUG_UD2			0xfffd
 
 #ifdef CONFIG_GENERIC_BUG
 
@@ -93,7 +92,7 @@ do {								\
 do {								\
 	__auto_type __flags = BUGFLAG_WARNING|(flags);		\
 	instrumentation_begin();				\
-	_BUG_FLAGS(ASM_UD2, __flags, ASM_REACHABLE);		\
+	_BUG_FLAGS(ASM_UD2, __flags, ANNOTATE_REACHABLE(1b));	\
 	instrumentation_end();					\
 } while (0)
 

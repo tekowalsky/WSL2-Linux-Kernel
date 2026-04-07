@@ -712,8 +712,8 @@ int __init arch_probe_nr_irqs(void)
 {
 	int nr;
 
-	if (nr_irqs > (NR_VECTORS * nr_cpu_ids))
-		nr_irqs = NR_VECTORS * nr_cpu_ids;
+	if (irq_get_nr_irqs() > NR_VECTORS * nr_cpu_ids)
+		irq_set_nr_irqs(NR_VECTORS * nr_cpu_ids);
 
 	nr = (gsi_top + nr_legacy_irqs()) + 8 * nr_cpu_ids;
 #if defined(CONFIG_PCI_MSI)
@@ -725,8 +725,8 @@ int __init arch_probe_nr_irqs(void)
 	else
 		nr += gsi_top * 16;
 #endif
-	if (nr < nr_irqs)
-		nr_irqs = nr;
+	if (nr < irq_get_nr_irqs())
+		irq_set_nr_irqs(nr);
 
 	/*
 	 * We don't know if PIC is present at this point so we need to do
@@ -738,8 +738,8 @@ int __init arch_probe_nr_irqs(void)
 void lapic_assign_legacy_vector(unsigned int irq, bool replace)
 {
 	/*
-	 * Use assign system here so it wont get accounted as allocated
-	 * and moveable in the cpu hotplug check and it prevents managed
+	 * Use assign system here so it won't get accounted as allocated
+	 * and movable in the cpu hotplug check and it prevents managed
 	 * irq reservation from touching it.
 	 */
 	irq_matrix_assign_system(vector_matrix, ISA_IRQ_VECTOR(irq), replace);
@@ -965,7 +965,7 @@ static void __vector_cleanup(struct vector_cleanup *cl, bool check_irr)
 	lockdep_assert_held(&vector_lock);
 
 	hlist_for_each_entry_safe(apicd, tmp, &cl->head, clist) {
-		unsigned int irr, vector = apicd->prev_vector;
+		unsigned int vector = apicd->prev_vector;
 
 		/*
 		 * Paranoia: Check if the vector that needs to be cleaned
@@ -979,8 +979,7 @@ static void __vector_cleanup(struct vector_cleanup *cl, bool check_irr)
 		 * fixup_irqs() was just called to scan IRR for set bits and
 		 * forward them to new destination CPUs via IPIs.
 		 */
-		irr = check_irr ? apic_read(APIC_IRR + (vector / 32 * 0x10)) : 0;
-		if (irr & (1U << (vector % 32))) {
+		if (check_irr && is_vector_pending(vector)) {
 			pr_warn_once("Moved interrupt pending in old target APIC %u\n", apicd->irq);
 			rearm = true;
 			continue;

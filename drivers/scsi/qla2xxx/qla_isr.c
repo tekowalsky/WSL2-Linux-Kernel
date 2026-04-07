@@ -878,9 +878,6 @@ qla27xx_copy_multiple_pkt(struct scsi_qla_host *vha, void **pkt,
 		payload_size = sizeof(purex->els_frame_payload);
 	}
 
-	if (total_bytes > sizeof(item->iocb.iocb))
-		total_bytes = sizeof(item->iocb.iocb);
-
 	pending_bytes = total_bytes;
 	no_bytes = (pending_bytes > payload_size) ? payload_size :
 		   pending_bytes;
@@ -1166,10 +1163,6 @@ qla27xx_copy_fpin_pkt(struct scsi_qla_host *vha, void **pkt,
 
 	total_bytes = (le16_to_cpu(purex->frame_size) & 0x0FFF)
 	    - PURX_ELS_HEADER_SIZE;
-
-	if (total_bytes > sizeof(item->iocb.iocb))
-		total_bytes = sizeof(item->iocb.iocb);
-
 	pending_bytes = total_bytes;
 	entry_count = entry_count_remaining = purex->entry_count;
 	no_bytes = (pending_bytes > sizeof(purex->els_frame_payload))  ?
@@ -3021,12 +3014,6 @@ qla2x00_handle_sense(srb_t *sp, uint8_t *sense_data, uint32_t par_sense_len,
 	}
 }
 
-struct scsi_dif_tuple {
-	__be16 guard;       /* Checksum */
-	__be16 app_tag;         /* APPL identifier */
-	__be32 ref_tag;         /* Target LBA or indirect LBA */
-};
-
 /*
  * Checks the guard or meta-data for the type of error
  * detected by the HBA. In case of errors, we set the
@@ -4480,6 +4467,32 @@ qla2xxx_msix_rsp_q(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
+irqreturn_t
+qla2xxx_msix_rsp_q_hs(int irq, void *dev_id)
+{
+	struct qla_hw_data *ha;
+	struct qla_qpair *qpair;
+	struct device_reg_24xx __iomem *reg;
+	unsigned long flags;
+
+	qpair = dev_id;
+	if (!qpair) {
+		ql_log(ql_log_info, NULL, 0x505b,
+		    "%s: NULL response queue pointer.\n", __func__);
+		return IRQ_NONE;
+	}
+	ha = qpair->hw;
+
+	reg = &ha->iobase->isp24;
+	spin_lock_irqsave(&ha->hardware_lock, flags);
+	wrt_reg_dword(&reg->hccr, HCCRX_CLR_RISC_INT);
+	spin_unlock_irqrestore(&ha->hardware_lock, flags);
+
+	queue_work(ha->wq, &qpair->q_work);
+
+	return IRQ_HANDLED;
+}
+
 /* Interrupt handling helpers. */
 
 struct qla_init_msix_entry {
@@ -4492,6 +4505,7 @@ static const struct qla_init_msix_entry msix_entries[] = {
 	{ "rsp_q", qla24xx_msix_rsp_q },
 	{ "atio_q", qla83xx_msix_atio_q },
 	{ "qpair_multiq", qla2xxx_msix_rsp_q },
+	{ "qpair_multiq_hs", qla2xxx_msix_rsp_q_hs },
 };
 
 static const struct qla_init_msix_entry qla82xx_msix_entries[] = {
@@ -4778,10 +4792,9 @@ free_irqs:
 }
 
 int qla25xx_request_irq(struct qla_hw_data *ha, struct qla_qpair *qpair,
-	struct qla_msix_entry *msix)
+	struct qla_msix_entry *msix, int vector_type)
 {
-	const struct qla_init_msix_entry *intr =
-		&msix_entries[QLA_MSIX_QPAIR_MULTIQ_RSP_Q];
+	const struct qla_init_msix_entry *intr = &msix_entries[vector_type];
 	scsi_qla_host_t *vha = pci_get_drvdata(ha->pdev);
 	int ret;
 

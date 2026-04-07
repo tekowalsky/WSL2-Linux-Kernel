@@ -179,13 +179,11 @@ static int tpd12s015_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int tpd12s015_remove(struct platform_device *pdev)
+static void tpd12s015_remove(struct platform_device *pdev)
 {
 	struct tpd12s015_device *tpd = platform_get_drvdata(pdev);
 
 	drm_bridge_remove(&tpd->bridge);
-
-	return 0;
 }
 
 static const struct of_device_id tpd12s015_of_match[] = {

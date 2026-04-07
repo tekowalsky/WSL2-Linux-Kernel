@@ -67,6 +67,12 @@ static const match_table_t cifs_secflavor_tokens = {
 	{ Opt_sec_err, NULL }
 };
 
+static const match_table_t cifs_upcall_target = {
+	{ Opt_upcall_target_mount, "mount" },
+	{ Opt_upcall_target_application, "app" },
+	{ Opt_upcall_target_err, NULL }
+};
+
 const struct fs_parameter_spec smb3_fs_parameters[] = {
 	/* Mount options that take no arguments */
 	fsparam_flag_no("user_xattr", Opt_user_xattr),
@@ -127,13 +133,16 @@ const struct fs_parameter_spec smb3_fs_parameters[] = {
 	fsparam_flag("rootfs", Opt_rootfs),
 	fsparam_flag("compress", Opt_compress),
 	fsparam_flag("witness", Opt_witness),
+	fsparam_flag_no("nativesocket", Opt_nativesocket),
+
+	/* Mount options which take uid or gid */
+	fsparam_uid("backupuid", Opt_backupuid),
+	fsparam_gid("backupgid", Opt_backupgid),
+	fsparam_uid("uid", Opt_uid),
+	fsparam_uid("cruid", Opt_cruid),
+	fsparam_gid("gid", Opt_gid),
 
 	/* Mount options which take numeric value */
-	fsparam_u32("backupuid", Opt_backupuid),
-	fsparam_u32("backupgid", Opt_backupgid),
-	fsparam_u32("uid", Opt_uid),
-	fsparam_u32("cruid", Opt_cruid),
-	fsparam_u32("gid", Opt_gid),
 	fsparam_u32("file_mode", Opt_file_mode),
 	fsparam_u32("dirmode", Opt_dirmode),
 	fsparam_u32("dir_mode", Opt_dirmode),
@@ -177,6 +186,9 @@ const struct fs_parameter_spec smb3_fs_parameters[] = {
 	fsparam_string("sec", Opt_sec),
 	fsparam_string("cache", Opt_cache),
 	fsparam_string("reparse", Opt_reparse),
+	fsparam_string("upcall_target", Opt_upcalltarget),
+	fsparam_string("symlink", Opt_symlink),
+	fsparam_string("symlinkroot", Opt_symlinkroot),
 
 	/* Arguments that should be ignored */
 	fsparam_flag("guest", Opt_ignore),
@@ -247,6 +259,29 @@ cifs_parse_security_flavors(struct fs_context *fc, char *value, struct smb3_fs_c
 	return 0;
 }
 
+static int
+cifs_parse_upcall_target(struct fs_context *fc, char *value, struct smb3_fs_context *ctx)
+{
+	substring_t args[MAX_OPT_ARGS];
+
+	ctx->upcall_target = UPTARGET_UNSPECIFIED;
+
+	switch (match_token(value, cifs_upcall_target, args)) {
+	case Opt_upcall_target_mount:
+		ctx->upcall_target = UPTARGET_MOUNT;
+		break;
+	case Opt_upcall_target_application:
+		ctx->upcall_target = UPTARGET_APP;
+		break;
+
+	default:
+		cifs_errorf(fc, "bad upcall target: %s\n", value);
+		return 1;
+	}
+
+	return 0;
+}
+
 static const match_table_t cifs_cacheflavor_tokens = {
 	{ Opt_cache_loose, "loose" },
 	{ Opt_cache_strict, "strict" },
@@ -301,6 +336,7 @@ cifs_parse_cache_flavor(struct fs_context *fc, char *value, struct smb3_fs_conte
 
 static const match_table_t reparse_flavor_tokens = {
 	{ Opt_reparse_default,	"default" },
+	{ Opt_reparse_none,	"none" },
 	{ Opt_reparse_nfs,	"nfs" },
 	{ Opt_reparse_wsl,	"wsl" },
 	{ Opt_reparse_err,	NULL },
@@ -315,6 +351,9 @@ static int parse_reparse_flavor(struct fs_context *fc, char *value,
 	case Opt_reparse_default:
 		ctx->reparse_type = CIFS_REPARSE_TYPE_DEFAULT;
 		break;
+	case Opt_reparse_none:
+		ctx->reparse_type = CIFS_REPARSE_TYPE_NONE;
+		break;
 	case Opt_reparse_nfs:
 		ctx->reparse_type = CIFS_REPARSE_TYPE_NFS;
 		break;
@@ -323,6 +362,55 @@ static int parse_reparse_flavor(struct fs_context *fc, char *value,
 		break;
 	default:
 		cifs_errorf(fc, "bad reparse= option: %s\n", value);
+		return 1;
+	}
+	return 0;
+}
+
+static const match_table_t symlink_flavor_tokens = {
+	{ Opt_symlink_default,		"default" },
+	{ Opt_symlink_none,		"none" },
+	{ Opt_symlink_native,		"native" },
+	{ Opt_symlink_unix,		"unix" },
+	{ Opt_symlink_mfsymlinks,	"mfsymlinks" },
+	{ Opt_symlink_sfu,		"sfu" },
+	{ Opt_symlink_nfs,		"nfs" },
+	{ Opt_symlink_wsl,		"wsl" },
+	{ Opt_symlink_err,		NULL },
+};
+
+static int parse_symlink_flavor(struct fs_context *fc, char *value,
+				struct smb3_fs_context *ctx)
+{
+	substring_t args[MAX_OPT_ARGS];
+
+	switch (match_token(value, symlink_flavor_tokens, args)) {
+	case Opt_symlink_default:
+		ctx->symlink_type = CIFS_SYMLINK_TYPE_DEFAULT;
+		break;
+	case Opt_symlink_none:
+		ctx->symlink_type = CIFS_SYMLINK_TYPE_NONE;
+		break;
+	case Opt_symlink_native:
+		ctx->symlink_type = CIFS_SYMLINK_TYPE_NATIVE;
+		break;
+	case Opt_symlink_unix:
+		ctx->symlink_type = CIFS_SYMLINK_TYPE_UNIX;
+		break;
+	case Opt_symlink_mfsymlinks:
+		ctx->symlink_type = CIFS_SYMLINK_TYPE_MFSYMLINKS;
+		break;
+	case Opt_symlink_sfu:
+		ctx->symlink_type = CIFS_SYMLINK_TYPE_SFU;
+		break;
+	case Opt_symlink_nfs:
+		ctx->symlink_type = CIFS_SYMLINK_TYPE_NFS;
+		break;
+	case Opt_symlink_wsl:
+		ctx->symlink_type = CIFS_SYMLINK_TYPE_WSL;
+		break;
+	default:
+		cifs_errorf(fc, "bad symlink= option: %s\n", value);
 		return 1;
 	}
 	return 0;
@@ -354,6 +442,8 @@ smb3_fs_context_dup(struct smb3_fs_context *new_ctx, struct smb3_fs_context *ctx
 	new_ctx->source = NULL;
 	new_ctx->iocharset = NULL;
 	new_ctx->leaf_fullpath = NULL;
+	new_ctx->dns_dom = NULL;
+	new_ctx->symlinkroot = NULL;
 	/*
 	 * Make sure to stay in sync with smb3_cleanup_fs_context_contents()
 	 */
@@ -368,6 +458,8 @@ smb3_fs_context_dup(struct smb3_fs_context *new_ctx, struct smb3_fs_context *ctx
 	DUP_CTX_STR(nodename);
 	DUP_CTX_STR(iocharset);
 	DUP_CTX_STR(leaf_fullpath);
+	DUP_CTX_STR(dns_dom);
+	DUP_CTX_STR(symlinkroot);
 
 	return 0;
 }
@@ -979,8 +1071,6 @@ static int smb3_reconfigure(struct fs_context *fc)
 	rc = smb3_sync_session_ctx_passwords(cifs_sb, ses);
 	if (rc) {
 		mutex_unlock(&ses->session_mutex);
-		kfree_sensitive(new_password);
-		kfree_sensitive(new_password2);
 		return rc;
 	}
 
@@ -1028,8 +1118,6 @@ static int smb3_fs_context_parse_param(struct fs_context *fc,
 	int i, opt;
 	bool is_smb3 = !strcmp(fc->fs_type->name, "smb3");
 	bool skip_parsing = false;
-	kuid_t uid;
-	kgid_t gid;
 
 	cifs_dbg(FYI, "CIFS: parsing cifs mount option '%s'\n", param->key);
 
@@ -1058,9 +1146,12 @@ static int smb3_fs_context_parse_param(struct fs_context *fc,
 
 	switch (opt) {
 	case Opt_compress:
+		if (!IS_ENABLED(CONFIG_CIFS_COMPRESSION)) {
+			cifs_errorf(fc, "CONFIG_CIFS_COMPRESSION kernel config option is unset\n");
+			goto cifs_parse_mount_err;
+		}
 		ctx->compress = true;
-		cifs_dbg(VFS,
-			"SMB3 compression support is experimental\n");
+		cifs_dbg(VFS, "SMB3 compression support is experimental\n");
 		break;
 	case Opt_nodfs:
 		ctx->nodfs = 1;
@@ -1163,38 +1254,23 @@ static int smb3_fs_context_parse_param(struct fs_context *fc,
 		}
 		break;
 	case Opt_uid:
-		uid = make_kuid(current_user_ns(), result.uint_32);
-		if (!uid_valid(uid))
-			goto cifs_parse_mount_err;
-		ctx->linux_uid = uid;
+		ctx->linux_uid = result.uid;
 		ctx->uid_specified = true;
 		break;
 	case Opt_cruid:
-		uid = make_kuid(current_user_ns(), result.uint_32);
-		if (!uid_valid(uid))
-			goto cifs_parse_mount_err;
-		ctx->cred_uid = uid;
+		ctx->cred_uid = result.uid;
 		ctx->cruid_specified = true;
 		break;
 	case Opt_backupuid:
-		uid = make_kuid(current_user_ns(), result.uint_32);
-		if (!uid_valid(uid))
-			goto cifs_parse_mount_err;
-		ctx->backupuid = uid;
+		ctx->backupuid = result.uid;
 		ctx->backupuid_specified = true;
 		break;
 	case Opt_backupgid:
-		gid = make_kgid(current_user_ns(), result.uint_32);
-		if (!gid_valid(gid))
-			goto cifs_parse_mount_err;
-		ctx->backupgid = gid;
+		ctx->backupgid = result.gid;
 		ctx->backupgid_specified = true;
 		break;
 	case Opt_gid:
-		gid = make_kgid(current_user_ns(), result.uint_32);
-		if (!gid_valid(gid))
-			goto cifs_parse_mount_err;
-		ctx->linux_gid = gid;
+		ctx->linux_gid = result.gid;
 		ctx->gid_specified = true;
 		break;
 	case Opt_port:
@@ -1251,7 +1327,6 @@ static int smb3_fs_context_parse_param(struct fs_context *fc,
 	case Opt_rsize:
 		ctx->rsize = result.uint_32;
 		ctx->got_rsize = true;
-		ctx->vol_rsize = ctx->rsize;
 		break;
 	case Opt_wsize:
 		ctx->wsize = result.uint_32;
@@ -1267,7 +1342,6 @@ static int smb3_fs_context_parse_param(struct fs_context *fc,
 					 ctx->wsize, PAGE_SIZE);
 			}
 		}
-		ctx->vol_wsize = ctx->wsize;
 		break;
 	case Opt_acregmax:
 		if (result.uint_32 > CIFS_MAX_ACTIMEO / HZ) {
@@ -1303,11 +1377,6 @@ static int smb3_fs_context_parse_param(struct fs_context *fc,
 		ctx->closetimeo = HZ * result.uint_32;
 		break;
 	case Opt_echo_interval:
-		if (result.uint_32 < SMB_ECHO_INTERVAL_MIN ||
-		    result.uint_32 > SMB_ECHO_INTERVAL_MAX) {
-			cifs_errorf(fc, "echo interval is out of bounds\n");
-			goto cifs_parse_mount_err;
-		}
 		ctx->echo_interval = result.uint_32;
 		break;
 	case Opt_snapshot:
@@ -1363,14 +1432,12 @@ static int smb3_fs_context_parse_param(struct fs_context *fc,
 			cifs_errorf(fc, "Unknown error parsing devname\n");
 			goto cifs_parse_mount_err;
 		}
-		kfree(ctx->source);
 		ctx->source = smb3_fs_context_fullpath(ctx, '/');
 		if (IS_ERR(ctx->source)) {
 			ctx->source = NULL;
 			cifs_errorf(fc, "OOM when copying UNC string\n");
 			goto cifs_parse_mount_err;
 		}
-		kfree(fc->source);
 		fc->source = kstrdup(ctx->source, GFP_KERNEL);
 		if (fc->source == NULL) {
 			cifs_errorf(fc, "OOM when copying UNC string\n");
@@ -1388,7 +1455,7 @@ static int smb3_fs_context_parse_param(struct fs_context *fc,
 			break;
 		}
 
-		if (strnlen(param->string, CIFS_MAX_USERNAME_LEN) ==
+		if (strnlen(param->string, CIFS_MAX_USERNAME_LEN) >
 		    CIFS_MAX_USERNAME_LEN) {
 			pr_warn("username too long\n");
 			goto cifs_parse_mount_err;
@@ -1542,6 +1609,10 @@ static int smb3_fs_context_parse_param(struct fs_context *fc,
 		break;
 	case Opt_sec:
 		if (cifs_parse_security_flavors(fc, param->string, ctx) != 0)
+			goto cifs_parse_mount_err;
+		break;
+	case Opt_upcalltarget:
+		if (cifs_parse_upcall_target(fc, param->string, ctx) != 0)
 			goto cifs_parse_mount_err;
 		break;
 	case Opt_cache:
@@ -1718,8 +1789,37 @@ static int smb3_fs_context_parse_param(struct fs_context *fc,
 		if (parse_reparse_flavor(fc, param->string, ctx))
 			goto cifs_parse_mount_err;
 		break;
+	case Opt_nativesocket:
+		ctx->nonativesocket = result.negated;
+		break;
+	case Opt_symlink:
+		if (parse_symlink_flavor(fc, param->string, ctx))
+			goto cifs_parse_mount_err;
+		break;
+	case Opt_symlinkroot:
+		if (param->string[0] != '/') {
+			cifs_errorf(fc, "symlinkroot mount options must be absolute path\n");
+			goto cifs_parse_mount_err;
+		}
+		kfree(ctx->symlinkroot);
+		ctx->symlinkroot = kstrdup(param->string, GFP_KERNEL);
+		if (!ctx->symlinkroot)
+			goto cifs_parse_mount_err;
+		break;
 	}
 	/* case Opt_ignore: - is ignored as expected ... */
+
+	if (ctx->multiuser && ctx->upcall_target == UPTARGET_MOUNT) {
+		cifs_errorf(fc, "multiuser mount option not supported with upcalltarget set as 'mount'\n");
+		goto cifs_parse_mount_err;
+	}
+
+	/*
+	 * By default resolve all native absolute symlinks relative to "/mnt/".
+	 * Same default has drvfs driver running in WSL for resolving SMB shares.
+	 */
+	if (!ctx->symlinkroot)
+		ctx->symlinkroot = kstrdup("/mnt/", GFP_KERNEL);
 
 	return 0;
 
@@ -1728,11 +1828,25 @@ static int smb3_fs_context_parse_param(struct fs_context *fc,
 	ctx->password = NULL;
 	kfree_sensitive(ctx->password2);
 	ctx->password2 = NULL;
-	kfree(ctx->source);
-	ctx->source = NULL;
-	kfree(fc->source);
-	fc->source = NULL;
 	return -EINVAL;
+}
+
+enum cifs_symlink_type get_cifs_symlink_type(struct cifs_sb_info *cifs_sb)
+{
+	if (cifs_sb->ctx->symlink_type == CIFS_SYMLINK_TYPE_DEFAULT) {
+		if (cifs_sb->ctx->mfsymlinks)
+			return CIFS_SYMLINK_TYPE_MFSYMLINKS;
+		else if (cifs_sb->ctx->sfu_emul)
+			return CIFS_SYMLINK_TYPE_SFU;
+		else if (cifs_sb->ctx->linux_ext && !cifs_sb->ctx->no_linux_ext)
+			return CIFS_SYMLINK_TYPE_UNIX;
+		else if (cifs_sb->ctx->reparse_type != CIFS_REPARSE_TYPE_NONE)
+			return CIFS_SYMLINK_TYPE_NATIVE;
+		else
+			return CIFS_SYMLINK_TYPE_NONE;
+	} else {
+		return cifs_sb->ctx->symlink_type;
+	}
 }
 
 int smb3_init_fs_context(struct fs_context *fc)
@@ -1811,6 +1925,8 @@ int smb3_init_fs_context(struct fs_context *fc)
 
 	ctx->retrans = 1;
 	ctx->reparse_type = CIFS_REPARSE_TYPE_DEFAULT;
+	ctx->symlink_type = CIFS_SYMLINK_TYPE_DEFAULT;
+	ctx->nonativesocket = 0;
 
 /*
  *	short int override_uid = -1;
@@ -1855,6 +1971,10 @@ smb3_cleanup_fs_context_contents(struct smb3_fs_context *ctx)
 	ctx->prepath = NULL;
 	kfree(ctx->leaf_fullpath);
 	ctx->leaf_fullpath = NULL;
+	kfree(ctx->dns_dom);
+	ctx->dns_dom = NULL;
+	kfree(ctx->symlinkroot);
+	ctx->symlinkroot = NULL;
 }
 
 void
@@ -2004,14 +2124,17 @@ void smb3_update_mnt_flags(struct cifs_sb_info *cifs_sb)
 	if (ctx->mfsymlinks) {
 		if (ctx->sfu_emul) {
 			/*
-			 * Our SFU ("Services for Unix" emulation does not allow
-			 * creating symlinks but does allow reading existing SFU
-			 * symlinks (it does allow both creating and reading SFU
-			 * style mknod and FIFOs though). When "mfsymlinks" and
+			 * Our SFU ("Services for Unix") emulation allows now
+			 * creating new and reading existing SFU symlinks.
+			 * Older Linux kernel versions were not able to neither
+			 * read existing nor create new SFU symlinks. But
+			 * creating and reading SFU style mknod and FIFOs was
+			 * supported for long time. When "mfsymlinks" and
 			 * "sfu" are both enabled at the same time, it allows
 			 * reading both types of symlinks, but will only create
 			 * them with mfsymlinks format. This allows better
-			 * Apple compatibility (probably better for Samba too)
+			 * Apple compatibility, compatibility with older Linux
+			 * kernel clients (probably better for Samba too)
 			 * while still recognizing old Windows style symlinks.
 			 */
 			cifs_dbg(VFS, "mount options mfsymlinks and sfu both enabled\n");

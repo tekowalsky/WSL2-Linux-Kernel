@@ -112,7 +112,7 @@ int sdw_bus_master_add(struct sdw_bus *bus, struct device *parent,
 	/* Set higher order bits */
 	*bus->assigned = ~GENMASK(SDW_BROADCAST_DEV_NUM, SDW_ENUM_DEV_NUM);
 
-	/* Set enumuration device number and broadcast device number */
+	/* Set enumeration device number and broadcast device number */
 	set_bit(SDW_ENUM_DEV_NUM, bus->assigned);
 	set_bit(SDW_BROADCAST_DEV_NUM, bus->assigned);
 
@@ -120,10 +120,6 @@ int sdw_bus_master_add(struct sdw_bus *bus, struct device *parent,
 	set_bit(SDW_GROUP12_DEV_NUM, bus->assigned);
 	set_bit(SDW_GROUP13_DEV_NUM, bus->assigned);
 	set_bit(SDW_MASTER_DEV_NUM, bus->assigned);
-
-	ret = sdw_irq_create(bus, fwnode);
-	if (ret)
-		return ret;
 
 	/*
 	 * SDW is an enumerable bus, but devices can be powered off. So,
@@ -141,7 +137,6 @@ int sdw_bus_master_add(struct sdw_bus *bus, struct device *parent,
 
 	if (ret < 0) {
 		dev_err(bus->dev, "Finding slaves failed:%d\n", ret);
-		sdw_irq_delete(bus);
 		return ret;
 	}
 
@@ -159,6 +154,10 @@ int sdw_bus_master_add(struct sdw_bus *bus, struct device *parent,
 	bus->params.curr_dr_freq = bus->params.max_dr_freq;
 	bus->params.curr_bank = SDW_BANK0;
 	bus->params.next_bank = SDW_BANK1;
+
+	ret = sdw_irq_create(bus, fwnode);
+	if (ret)
+		return ret;
 
 	return 0;
 }
@@ -814,6 +813,16 @@ void sdw_extract_slave_id(struct sdw_bus *bus,
 }
 EXPORT_SYMBOL(sdw_extract_slave_id);
 
+bool is_clock_scaling_supported_by_slave(struct sdw_slave *slave)
+{
+	/*
+	 * Dynamic scaling is a defined by SDCA. However, some devices expose the class ID but
+	 * can't support dynamic scaling. We might need a quirk to handle such devices.
+	 */
+	return slave->id.class_id;
+}
+EXPORT_SYMBOL(is_clock_scaling_supported_by_slave);
+
 static int sdw_program_device_num(struct sdw_bus *bus, bool *programmed)
 {
 	u8 buf[SDW_NUM_DEV_ID_REGISTERS] = {0};
@@ -1006,7 +1015,7 @@ static int sdw_slave_clk_stop_prepare(struct sdw_slave *slave,
 	return ret;
 }
 
-static int sdw_bus_wait_for_clk_prep_deprep(struct sdw_bus *bus, u16 dev_num)
+static int sdw_bus_wait_for_clk_prep_deprep(struct sdw_bus *bus, u16 dev_num, bool prepare)
 {
 	int retry = bus->clk_stop_timeout;
 	int val;
@@ -1020,7 +1029,8 @@ static int sdw_bus_wait_for_clk_prep_deprep(struct sdw_bus *bus, u16 dev_num)
 		}
 		val &= SDW_SCP_STAT_CLK_STP_NF;
 		if (!val) {
-			dev_dbg(bus->dev, "clock stop prep/de-prep done slave:%d\n",
+			dev_dbg(bus->dev, "clock stop %s done slave:%d\n",
+				prepare ? "prepare" : "deprepare",
 				dev_num);
 			return 0;
 		}
@@ -1029,7 +1039,8 @@ static int sdw_bus_wait_for_clk_prep_deprep(struct sdw_bus *bus, u16 dev_num)
 		retry--;
 	} while (retry);
 
-	dev_err(bus->dev, "clock stop prep/de-prep failed slave:%d\n",
+	dev_dbg(bus->dev, "clock stop %s did not complete for slave:%d\n",
+		prepare ? "prepare" : "deprepare",
 		dev_num);
 
 	return -ETIMEDOUT;
@@ -1100,7 +1111,7 @@ int sdw_bus_prep_clk_stop(struct sdw_bus *bus)
 	 */
 	if (!simple_clk_stop) {
 		ret = sdw_bus_wait_for_clk_prep_deprep(bus,
-						       SDW_BROADCAST_DEV_NUM);
+						       SDW_BROADCAST_DEV_NUM, true);
 		/*
 		 * if there are no Slave devices present and the reply is
 		 * Command_Ignored/-ENODATA, we don't need to continue with the
@@ -1220,7 +1231,7 @@ int sdw_bus_exit_clk_stop(struct sdw_bus *bus)
 	 * state machine
 	 */
 	if (!simple_clk_stop) {
-		ret = sdw_bus_wait_for_clk_prep_deprep(bus, SDW_BROADCAST_DEV_NUM);
+		ret = sdw_bus_wait_for_clk_prep_deprep(bus, SDW_BROADCAST_DEV_NUM, false);
 		if (ret < 0)
 			dev_warn(bus->dev, "clock stop deprepare wait failed:%d\n", ret);
 	}
@@ -1275,23 +1286,12 @@ int sdw_configure_dpn_intr(struct sdw_slave *slave,
 	return ret;
 }
 
-static int sdw_slave_set_frequency(struct sdw_slave *slave)
+int sdw_slave_get_scale_index(struct sdw_slave *slave, u8 *base)
 {
 	u32 mclk_freq = slave->bus->prop.mclk_freq;
 	u32 curr_freq = slave->bus->params.curr_dr_freq >> 1;
 	unsigned int scale;
 	u8 scale_index;
-	u8 base;
-	int ret;
-
-	/*
-	 * frequency base and scale registers are required for SDCA
-	 * devices. They may also be used for 1.2+/non-SDCA devices.
-	 * Driver can set the property, we will need a DisCo property
-	 * to discover this case from platform firmware.
-	 */
-	if (!slave->id.class_id && !slave->prop.clock_reg_supported)
-		return 0;
 
 	if (!mclk_freq) {
 		dev_err(&slave->dev,
@@ -1310,19 +1310,19 @@ static int sdw_slave_set_frequency(struct sdw_slave *slave)
 	 */
 	if (!(19200000 % mclk_freq)) {
 		mclk_freq = 19200000;
-		base = SDW_SCP_BASE_CLOCK_19200000_HZ;
-	} else if (!(24000000 % mclk_freq)) {
-		mclk_freq = 24000000;
-		base = SDW_SCP_BASE_CLOCK_24000000_HZ;
-	} else if (!(24576000 % mclk_freq)) {
-		mclk_freq = 24576000;
-		base = SDW_SCP_BASE_CLOCK_24576000_HZ;
+		*base = SDW_SCP_BASE_CLOCK_19200000_HZ;
 	} else if (!(22579200 % mclk_freq)) {
 		mclk_freq = 22579200;
-		base = SDW_SCP_BASE_CLOCK_22579200_HZ;
+		*base = SDW_SCP_BASE_CLOCK_22579200_HZ;
+	} else if (!(24576000 % mclk_freq)) {
+		mclk_freq = 24576000;
+		*base = SDW_SCP_BASE_CLOCK_24576000_HZ;
 	} else if (!(32000000 % mclk_freq)) {
 		mclk_freq = 32000000;
-		base = SDW_SCP_BASE_CLOCK_32000000_HZ;
+		*base = SDW_SCP_BASE_CLOCK_32000000_HZ;
+	} else if (!(96000000 % mclk_freq)) {
+		mclk_freq = 24000000;
+		*base = SDW_SCP_BASE_CLOCK_24000000_HZ;
 	} else {
 		dev_err(&slave->dev,
 			"Unsupported clock base, mclk %d\n",
@@ -1353,6 +1353,34 @@ static int sdw_slave_set_frequency(struct sdw_slave *slave)
 	}
 	scale_index++;
 
+	dev_dbg(&slave->dev,
+		"Configured bus base %d, scale %d, mclk %d, curr_freq %d\n",
+		*base, scale_index, mclk_freq, curr_freq);
+
+	return scale_index;
+}
+EXPORT_SYMBOL(sdw_slave_get_scale_index);
+
+static int sdw_slave_set_frequency(struct sdw_slave *slave)
+{
+	int scale_index;
+	u8 base;
+	int ret;
+
+	/*
+	 * frequency base and scale registers are required for SDCA
+	 * devices. They may also be used for 1.2+/non-SDCA devices.
+	 * Driver can set the property directly, for now there's no
+	 * DisCo property to discover support for the scaling registers
+	 * from platform firmware.
+	 */
+	if (!slave->id.class_id && !slave->prop.clock_reg_supported)
+		return 0;
+
+	scale_index = sdw_slave_get_scale_index(slave, &base);
+	if (scale_index < 0)
+		return scale_index;
+
 	ret = sdw_write_no_pm(slave, SDW_SCP_BUS_CLOCK_BASE, base);
 	if (ret < 0) {
 		dev_err(&slave->dev,
@@ -1371,10 +1399,6 @@ static int sdw_slave_set_frequency(struct sdw_slave *slave)
 	if (ret < 0)
 		dev_err(&slave->dev,
 			"SDW_SCP_BUSCLOCK_SCALE_B1 write failed:%d\n", ret);
-
-	dev_dbg(&slave->dev,
-		"Configured bus base %d, scale %d, mclk %d, curr_freq %d\n",
-		base, scale_index, mclk_freq, curr_freq);
 
 	return ret;
 }
@@ -1409,7 +1433,7 @@ static int sdw_initialize_slave(struct sdw_slave *slave)
 		}
 	}
 	if ((slave->bus->prop.quirks & SDW_MASTER_QUIRKS_CLEAR_INITIAL_PARITY) &&
-	    !(slave->prop.quirks & SDW_SLAVE_QUIRKS_INVALID_INITIAL_PARITY)) {
+	    !(prop->quirks & SDW_SLAVE_QUIRKS_INVALID_INITIAL_PARITY)) {
 		/* Clear parity interrupt before enabling interrupt mask */
 		status = sdw_read_no_pm(slave, SDW_SCP_INT1);
 		if (status < 0) {
@@ -1435,7 +1459,7 @@ static int sdw_initialize_slave(struct sdw_slave *slave)
 	 * device-dependent, it might e.g. only be enabled in
 	 * steady-state after a couple of frames.
 	 */
-	val = slave->prop.scp_int1_mask;
+	val = prop->scp_int1_mask;
 
 	/* Enable SCP interrupts */
 	ret = sdw_update_no_pm(slave, SDW_SCP_INTMASK1, val, val);
@@ -1446,7 +1470,7 @@ static int sdw_initialize_slave(struct sdw_slave *slave)
 	}
 
 	/* No need to continue if DP0 is not present */
-	if (!slave->prop.dp0_prop)
+	if (!prop->dp0_prop)
 		return 0;
 
 	/* Enable DP0 interrupts */
@@ -1473,7 +1497,7 @@ static int sdw_handle_dp0_interrupt(struct sdw_slave *slave, u8 *slave_status)
 	}
 
 	do {
-		clear = status & ~SDW_DP0_INTERRUPTS;
+		clear = status & ~(SDW_DP0_INTERRUPTS | SDW_DP0_SDCA_CASCADE);
 
 		if (status & SDW_DP0_INT_TEST_FAIL) {
 			dev_err(&slave->dev, "Test fail for port 0\n");
@@ -1730,14 +1754,14 @@ static int sdw_handle_slave_alerts(struct sdw_slave *slave)
 
 		/* Update the Slave driver */
 		if (slave_notify) {
-			if (slave->prop.use_domain_irq && slave->irq)
-				handle_nested_irq(slave->irq);
-
 			mutex_lock(&slave->sdw_dev_lock);
 
 			if (slave->probed) {
 				struct device *dev = &slave->dev;
 				struct sdw_driver *drv = drv_to_sdw_driver(dev->driver);
+
+				if (slave->prop.use_domain_irq && slave->irq)
+					handle_nested_irq(slave->irq);
 
 				if (drv->ops && drv->ops->interrupt_callback) {
 					slave_intr.sdca_cascade = sdca_cascade;

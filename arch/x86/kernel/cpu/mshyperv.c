@@ -19,7 +19,7 @@
 #include <linux/random.h>
 #include <asm/processor.h>
 #include <asm/hypervisor.h>
-#include <asm/hyperv-tlfs.h>
+#include <hyperv/hvhdk.h>
 #include <asm/mshyperv.h>
 #include <asm/desc.h>
 #include <asm/idtentry.h>
@@ -208,7 +208,9 @@ static void hv_machine_shutdown(void)
 	if (kexec_in_progress)
 		hyperv_cleanup();
 }
+#endif /* CONFIG_KEXEC_CORE */
 
+#ifdef CONFIG_CRASH_DUMP
 static void hv_machine_crash_shutdown(struct pt_regs *regs)
 {
 	if (hv_crash_handler)
@@ -220,7 +222,7 @@ static void hv_machine_crash_shutdown(struct pt_regs *regs)
 	/* Disable the hypercall page when there is only 1 active CPU. */
 	hyperv_cleanup();
 }
-#endif /* CONFIG_KEXEC_CORE */
+#endif /* CONFIG_CRASH_DUMP */
 
 static u64 hv_ref_counter_at_suspend;
 static void (*old_save_sched_clock_state)(void);
@@ -318,11 +320,14 @@ static uint32_t  __init ms_hyperv_platform(void)
 static int hv_nmi_unknown(unsigned int val, struct pt_regs *regs)
 {
 	static atomic_t nmi_cpu = ATOMIC_INIT(-1);
+	unsigned int old_cpu, this_cpu;
 
 	if (!unknown_nmi_panic)
 		return NMI_DONE;
 
-	if (atomic_cmpxchg(&nmi_cpu, -1, raw_smp_processor_id()) != -1)
+	old_cpu = -1;
+	this_cpu = raw_smp_processor_id();
+	if (!atomic_try_cmpxchg(&nmi_cpu, &old_cpu, this_cpu))
 		return NMI_HANDLED;
 
 	return NMI_DONE;
@@ -420,8 +425,6 @@ int hv_get_hypervisor_version(union hv_hypervisor_version_info *info)
 
 static void __init ms_hyperv_init_platform(void)
 {
-	union hv_hypervisor_version_info version;
-	unsigned int build = 0;
 	int hv_max_functions_eax;
 
 #ifdef CONFIG_PARAVIRT
@@ -447,18 +450,6 @@ static void __init ms_hyperv_init_platform(void)
 
 	pr_debug("Hyper-V: max %u virtual processors, %u logical processors\n",
 		 ms_hyperv.max_vp_index, ms_hyperv.max_lp_index);
-
-	/*
-	 * Host builds earlier than 22621 (Win 11 22H2) have a bug in the
-	 * invariant TSC feature that may result in the guest seeing a "slow"
-	 * TSC after host hibernation. This causes problems with synthetic
-	 * timer interrupts. In such a case, avoid the bug by assuming the
-	 * feature is not present.
-	 */
-	if (!hv_get_hypervisor_version(&version))
-		build = version.build_number;
-	if (build < 22621)
-		ms_hyperv.features &= ~HV_ACCESS_TSC_INVARIANT;
 
 	/*
 	 * Check CPU management privilege.
@@ -515,10 +506,24 @@ static void __init ms_hyperv_init_platform(void)
 			ms_hyperv.hints &= ~HV_X64_APIC_ACCESS_RECOMMENDED;
 
 			if (!ms_hyperv.paravisor_present) {
-				/* To be supported: more work is required.  */
+				/*
+				 * Mark the Hyper-V TSC page feature as disabled
+				 * in a TDX VM without paravisor so that the
+				 * Invariant TSC, which is a better clocksource
+				 * anyway, is used instead.
+				 */
 				ms_hyperv.features &= ~HV_MSR_REFERENCE_TSC_AVAILABLE;
 
-				/* HV_REGISTER_CRASH_CTL is unsupported. */
+				/*
+				 * The Invariant TSC is expected to be available
+				 * in a TDX VM without paravisor, but if not,
+				 * print a warning message. The slower Hyper-V MSR-based
+				 * Ref Counter should end up being the clocksource.
+				 */
+				if (!(ms_hyperv.features & HV_ACCESS_TSC_INVARIANT))
+					pr_warn("Hyper-V: Invariant TSC is unavailable\n");
+
+				/* HV_MSR_CRASH_CTL is unsupported. */
 				ms_hyperv.misc_features &= ~HV_FEATURE_GUEST_CRASH_MSR_AVAILABLE;
 
 				/* Don't trust Hyper-V's TLB-flushing hypercalls. */
@@ -559,9 +564,13 @@ static void __init ms_hyperv_init_platform(void)
 	no_timer_check = 1;
 #endif
 
-#if IS_ENABLED(CONFIG_HYPERV) && defined(CONFIG_KEXEC_CORE)
+#if IS_ENABLED(CONFIG_HYPERV)
+#if defined(CONFIG_KEXEC_CORE)
 	machine_ops.shutdown = hv_machine_shutdown;
+#endif
+#if defined(CONFIG_CRASH_DUMP)
 	machine_ops.crash_shutdown = hv_machine_crash_shutdown;
+#endif
 #endif
 	if (ms_hyperv.features & HV_ACCESS_TSC_INVARIANT) {
 		/*
@@ -593,19 +602,18 @@ static void __init ms_hyperv_init_platform(void)
 	 */
 	x86_platform.apic_post_init = hyperv_init;
 	hyperv_setup_mmu_ops();
-	/* Setup the IDT for hypervisor callback */
-	alloc_intr_gate(HYPERVISOR_CALLBACK_VECTOR, asm_sysvec_hyperv_callback);
 
-	/* Setup the IDT for reenlightenment notifications */
+	/* Install system interrupt handler for hypervisor callback */
+	sysvec_install(HYPERVISOR_CALLBACK_VECTOR, sysvec_hyperv_callback);
+
+	/* Install system interrupt handler for reenlightenment notifications */
 	if (ms_hyperv.features & HV_ACCESS_REENLIGHTENMENT) {
-		alloc_intr_gate(HYPERV_REENLIGHTENMENT_VECTOR,
-				asm_sysvec_hyperv_reenlightenment);
+		sysvec_install(HYPERV_REENLIGHTENMENT_VECTOR, sysvec_hyperv_reenlightenment);
 	}
 
-	/* Setup the IDT for stimer0 */
+	/* Install system interrupt handler for stimer0 */
 	if (ms_hyperv.misc_features & HV_STIMER_DIRECT_MODE_AVAILABLE) {
-		alloc_intr_gate(HYPERV_STIMER0_VECTOR,
-				asm_sysvec_hyperv_stimer0);
+		sysvec_install(HYPERV_STIMER0_VECTOR, sysvec_hyperv_stimer0);
 	}
 
 # ifdef CONFIG_SMP
@@ -698,6 +706,7 @@ const __initconst struct hypervisor_x86 x86_hyper_ms_hyperv = {
 	.init.x2apic_available	= ms_hyperv_x2apic_available,
 	.init.msi_ext_dest_id	= ms_hyperv_msi_ext_dest_id,
 	.init.init_platform	= ms_hyperv_init_platform,
+	.init.guest_late_init	= ms_hyperv_late_init,
 #ifdef CONFIG_AMD_MEM_ENCRYPT
 	.runtime.sev_es_hcall_prepare = hv_sev_es_hcall_prepare,
 	.runtime.sev_es_hcall_finish = hv_sev_es_hcall_finish,

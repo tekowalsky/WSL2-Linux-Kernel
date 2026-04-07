@@ -62,6 +62,7 @@
 #include <net/fib_rules.h>
 #include <linux/netconf.h>
 #include <net/rtnh.h>
+#include <net/inet_dscp.h>
 
 #include <linux/nospec.h>
 
@@ -118,6 +119,11 @@ static void ipmr_expire_process(struct timer_list *t);
 	list_for_each_entry_rcu(mrt, &net->ipv4.mr_tables, list,	\
 				lockdep_rtnl_is_held() ||		\
 				list_empty(&net->ipv4.mr_tables))
+
+static bool ipmr_can_free_table(struct net *net)
+{
+	return !check_net(net) || !net_initialized(net);
+}
 
 static struct mr_table *ipmr_mr_table_iter(struct net *net,
 					   struct mr_table *mrt)
@@ -263,7 +269,7 @@ static int __net_init ipmr_rules_init(struct net *net)
 		goto err1;
 	}
 
-	err = fib_default_rule_add(ops, 0x7fff, RT_TABLE_DEFAULT, 0);
+	err = fib_default_rule_add(ops, 0x7fff, RT_TABLE_DEFAULT);
 	if (err < 0)
 		goto err2;
 
@@ -297,7 +303,7 @@ static int ipmr_rules_dump(struct net *net, struct notifier_block *nb,
 	return fib_rules_dump(net, nb, RTNL_FAMILY_IPMR, extack);
 }
 
-static unsigned int ipmr_rules_seq_read(struct net *net)
+static unsigned int ipmr_rules_seq_read(const struct net *net)
 {
 	return fib_rules_seq_read(net, RTNL_FAMILY_IPMR);
 }
@@ -310,6 +316,11 @@ EXPORT_SYMBOL(ipmr_rule_default);
 #else
 #define ipmr_for_each_table(mrt, net) \
 	for (mrt = net->ipv4.mrt; mrt; mrt = NULL)
+
+static bool ipmr_can_free_table(struct net *net)
+{
+	return !check_net(net);
+}
 
 static struct mr_table *ipmr_mr_table_iter(struct net *net,
 					   struct mr_table *mrt)
@@ -357,7 +368,7 @@ static int ipmr_rules_dump(struct net *net, struct notifier_block *nb,
 	return 0;
 }
 
-static unsigned int ipmr_rules_seq_read(struct net *net)
+static unsigned int ipmr_rules_seq_read(const struct net *net)
 {
 	return 0;
 }
@@ -424,6 +435,10 @@ static struct mr_table *ipmr_new_table(struct net *net, u32 id)
 
 static void ipmr_free_table(struct mr_table *mrt)
 {
+	struct net *net = read_pnet(&mrt->net);
+
+	WARN_ON_ONCE(!ipmr_can_free_table(net));
+
 	timer_shutdown_sync(&mrt->ipmr_expire_timer);
 	mroute_clean_tables(mrt, MRT_FLUSH_VIFS | MRT_FLUSH_VIFS_STATIC |
 				 MRT_FLUSH_MFC | MRT_FLUSH_MFC_STATIC);
@@ -453,7 +468,7 @@ static bool ipmr_init_vif_indev(const struct net_device *dev)
 static struct net_device *ipmr_new_tunnel(struct net *net, struct vifctl *v)
 {
 	struct net_device *tunnel_dev, *new_dev;
-	struct ip_tunnel_parm p = { };
+	struct ip_tunnel_parm_kern p = { };
 	int err;
 
 	tunnel_dev = __dev_get_by_name(net, "tunl0");
@@ -548,7 +563,7 @@ static void reg_vif_setup(struct net_device *dev)
 	dev->flags		= IFF_NOARP;
 	dev->netdev_ops		= &reg_vif_netdev_ops;
 	dev->needs_free_netdev	= true;
-	dev->features		|= NETIF_F_NETNS_LOCAL;
+	dev->netns_local	= true;
 }
 
 static struct net_device *ipmr_reg_vif(struct net *net, struct mr_table *mrt)
@@ -1880,7 +1895,7 @@ static void ipmr_queue_xmit(struct net *net, struct mr_table *mrt,
 					   vif->remote, vif->local,
 					   0, 0,
 					   IPPROTO_IPIP,
-					   RT_TOS(iph->tos), vif->link);
+					   iph->tos & INET_DSCP_MASK, vif->link);
 		if (IS_ERR(rt))
 			goto out_free;
 		encap = sizeof(struct iphdr);
@@ -1888,7 +1903,7 @@ static void ipmr_queue_xmit(struct net *net, struct mr_table *mrt,
 		rt = ip_route_output_ports(net, &fl4, NULL, iph->daddr, 0,
 					   0, 0,
 					   IPPROTO_IPIP,
-					   RT_TOS(iph->tos), vif->link);
+					   iph->tos & INET_DSCP_MASK, vif->link);
 		if (IS_ERR(rt))
 			goto out_free;
 	}
@@ -2092,7 +2107,7 @@ static struct mr_table *ipmr_rt_fib_lookup(struct net *net, struct sk_buff *skb)
 	struct flowi4 fl4 = {
 		.daddr = iph->daddr,
 		.saddr = iph->saddr,
-		.flowi4_tos = RT_TOS(iph->tos),
+		.flowi4_tos = inet_dscp_to_dsfield(ip4h_dscp(iph)),
 		.flowi4_oif = (rt_is_output_route(rt) ?
 			       skb->dev->ifindex : 0),
 		.flowi4_iif = (rt_is_output_route(rt) ?
@@ -2420,8 +2435,7 @@ static void mroute_netlink_event(struct mr_table *mrt, struct mfc_cache *mfc,
 
 errout:
 	kfree_skb(skb);
-	if (err < 0)
-		rtnl_set_sk_err(net, RTNLGRP_IPV4_MROUTE, err);
+	rtnl_set_sk_err(net, RTNLGRP_IPV4_MROUTE, err);
 }
 
 static size_t igmpmsg_netlink_msgsize(size_t payloadlen)
@@ -2560,9 +2574,9 @@ static int ipmr_rtm_getroute(struct sk_buff *in_skb, struct nlmsghdr *nlh,
 	if (err < 0)
 		goto errout;
 
-	src = tb[RTA_SRC] ? nla_get_in_addr(tb[RTA_SRC]) : 0;
-	grp = tb[RTA_DST] ? nla_get_in_addr(tb[RTA_DST]) : 0;
-	tableid = tb[RTA_TABLE] ? nla_get_u32(tb[RTA_TABLE]) : 0;
+	src = nla_get_in_addr_default(tb[RTA_SRC], 0);
+	grp = nla_get_in_addr_default(tb[RTA_DST], 0);
+	tableid = nla_get_u32_default(tb[RTA_TABLE], 0);
 
 	mrt = __ipmr_get_table(net, tableid ? tableid : RT_TABLE_DEFAULT);
 	if (!mrt) {
@@ -2603,7 +2617,9 @@ errout_free:
 
 static int ipmr_rtm_dumproute(struct sk_buff *skb, struct netlink_callback *cb)
 {
-	struct fib_dump_filter filter = {};
+	struct fib_dump_filter filter = {
+		.rtnl_held = true,
+	};
 	int err;
 
 	if (cb->strict_check) {
@@ -3049,11 +3065,9 @@ static const struct net_protocol pim_protocol = {
 };
 #endif
 
-static unsigned int ipmr_seq_read(struct net *net)
+static unsigned int ipmr_seq_read(const struct net *net)
 {
-	ASSERT_RTNL();
-
-	return net->ipv4.ipmr_seq + ipmr_rules_seq_read(net);
+	return READ_ONCE(net->ipv4.ipmr_seq) + ipmr_rules_seq_read(net);
 }
 
 static int ipmr_dump(struct net *net, struct notifier_block *nb,
@@ -3153,14 +3167,22 @@ static struct pernet_operations ipmr_net_ops = {
 	.exit_batch = ipmr_net_exit_batch,
 };
 
+static const struct rtnl_msg_handler ipmr_rtnl_msg_handlers[] __initconst = {
+	{.protocol = RTNL_FAMILY_IPMR, .msgtype = RTM_GETLINK,
+	 .dumpit = ipmr_rtm_dumplink},
+	{.protocol = RTNL_FAMILY_IPMR, .msgtype = RTM_NEWROUTE,
+	 .doit = ipmr_rtm_route},
+	{.protocol = RTNL_FAMILY_IPMR, .msgtype = RTM_DELROUTE,
+	 .doit = ipmr_rtm_route},
+	{.protocol = RTNL_FAMILY_IPMR, .msgtype = RTM_GETROUTE,
+	 .doit = ipmr_rtm_getroute, .dumpit = ipmr_rtm_dumproute},
+};
+
 int __init ip_mr_init(void)
 {
 	int err;
 
-	mrt_cachep = kmem_cache_create("ip_mrt_cache",
-				       sizeof(struct mfc_cache),
-				       0, SLAB_HWCACHE_ALIGN | SLAB_PANIC,
-				       NULL);
+	mrt_cachep = KMEM_CACHE(mfc_cache, SLAB_HWCACHE_ALIGN | SLAB_PANIC);
 
 	err = register_pernet_subsys(&ipmr_net_ops);
 	if (err)
@@ -3176,15 +3198,8 @@ int __init ip_mr_init(void)
 		goto add_proto_fail;
 	}
 #endif
-	rtnl_register(RTNL_FAMILY_IPMR, RTM_GETROUTE,
-		      ipmr_rtm_getroute, ipmr_rtm_dumproute, 0);
-	rtnl_register(RTNL_FAMILY_IPMR, RTM_NEWROUTE,
-		      ipmr_rtm_route, NULL, 0);
-	rtnl_register(RTNL_FAMILY_IPMR, RTM_DELROUTE,
-		      ipmr_rtm_route, NULL, 0);
+	rtnl_register_many(ipmr_rtnl_msg_handlers);
 
-	rtnl_register(RTNL_FAMILY_IPMR, RTM_GETLINK,
-		      NULL, ipmr_rtm_dumplink, 0);
 	return 0;
 
 #ifdef CONFIG_IP_PIMSM_V2

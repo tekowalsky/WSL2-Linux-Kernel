@@ -607,6 +607,7 @@ static int tegra_i2c_wait_for_config_load(struct tegra_i2c_dev *i2c_dev)
 static int tegra_i2c_init(struct tegra_i2c_dev *i2c_dev)
 {
 	u32 val, clk_divisor, clk_multiplier, tsu_thd, tlow, thigh, non_hs_mode;
+	acpi_handle handle = ACPI_HANDLE(i2c_dev->dev);
 	struct i2c_timings *t = &i2c_dev->timings;
 	int err;
 
@@ -618,7 +619,11 @@ static int tegra_i2c_init(struct tegra_i2c_dev *i2c_dev)
 	 * emit a noisy warning on error, which won't stay unnoticed and
 	 * won't hose machine entirely.
 	 */
-	err = device_reset(i2c_dev->dev);
+	if (handle)
+		err = acpi_evaluate_object(handle, "_RST", NULL, NULL);
+	else
+		err = reset_control_reset(i2c_dev->rst);
+
 	WARN_ON_ONCE(err);
 
 	if (IS_DVC(i2c_dev))
@@ -1326,7 +1331,6 @@ static int tegra_i2c_xfer_msg(struct tegra_i2c_dev *i2c_dev,
 		dmaengine_terminate_sync(i2c_dev->dma_chan);
 
 		if (!time_left && !completion_done(&i2c_dev->dma_complete)) {
-			dev_err(i2c_dev->dev, "DMA transfer timed out\n");
 			tegra_i2c_init(i2c_dev);
 			return -ETIMEDOUT;
 		}
@@ -1346,7 +1350,6 @@ static int tegra_i2c_xfer_msg(struct tegra_i2c_dev *i2c_dev,
 	tegra_i2c_mask_irq(i2c_dev, int_mask);
 
 	if (time_left == 0) {
-		dev_err(i2c_dev->dev, "I2C transfer timed out\n");
 		tegra_i2c_init(i2c_dev);
 		return -ETIMEDOUT;
 	}
@@ -1392,11 +1395,6 @@ static int tegra_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg msgs[],
 			ret = tegra_i2c_xfer_msg(i2c_dev, &msgs[i], MSG_END_CONTINUE);
 			if (ret)
 				break;
-
-			/* Validate message length before proceeding */
-			if (msgs[i].buf[0] == 0 || msgs[i].buf[0] > I2C_SMBUS_BLOCK_MAX)
-				break;
-
 			/* Set the msg length from first byte */
 			msgs[i].len += msgs[i].buf[0];
 			dev_dbg(i2c_dev->dev, "reading %d bytes\n", msgs[i].len);
@@ -1663,6 +1661,19 @@ static void tegra_i2c_parse_dt(struct tegra_i2c_dev *i2c_dev)
 		i2c_dev->is_vi = true;
 }
 
+static int tegra_i2c_init_reset(struct tegra_i2c_dev *i2c_dev)
+{
+	if (ACPI_HANDLE(i2c_dev->dev))
+		return 0;
+
+	i2c_dev->rst = devm_reset_control_get_exclusive(i2c_dev->dev, "i2c");
+	if (IS_ERR(i2c_dev->rst))
+		return dev_err_probe(i2c_dev->dev, PTR_ERR(i2c_dev->rst),
+				      "failed to get reset control\n");
+
+	return 0;
+}
+
 static int tegra_i2c_init_clocks(struct tegra_i2c_dev *i2c_dev)
 {
 	int err;
@@ -1771,6 +1782,10 @@ static int tegra_i2c_probe(struct platform_device *pdev)
 		return err;
 
 	tegra_i2c_parse_dt(i2c_dev);
+
+	err = tegra_i2c_init_reset(i2c_dev);
+	if (err)
+		return err;
 
 	err = tegra_i2c_init_clocks(i2c_dev);
 	if (err)
@@ -1949,7 +1964,7 @@ MODULE_DEVICE_TABLE(acpi, tegra_i2c_acpi_match);
 
 static struct platform_driver tegra_i2c_driver = {
 	.probe = tegra_i2c_probe,
-	.remove_new = tegra_i2c_remove,
+	.remove = tegra_i2c_remove,
 	.driver = {
 		.name = "tegra-i2c",
 		.of_match_table = tegra_i2c_of_match,

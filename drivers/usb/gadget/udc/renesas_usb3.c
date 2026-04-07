@@ -2658,7 +2658,6 @@ static void renesas_usb3_remove(struct platform_device *pdev)
 	struct renesas_usb3 *usb3 = platform_get_drvdata(pdev);
 
 	debugfs_remove_recursive(usb3->dentry);
-	put_device(usb3->host_dev);
 	device_remove_file(&pdev->dev, &dev_attr_role);
 
 	cancel_work_sync(&usb3->role_work);
@@ -3014,7 +3013,7 @@ static SIMPLE_DEV_PM_OPS(renesas_usb3_pm_ops, renesas_usb3_suspend,
 
 static struct platform_driver renesas_usb3_driver = {
 	.probe		= renesas_usb3_probe,
-	.remove_new	= renesas_usb3_remove,
+	.remove		= renesas_usb3_remove,
 	.driver		= {
 		.name =	udc_name,
 		.pm		= &renesas_usb3_pm_ops,

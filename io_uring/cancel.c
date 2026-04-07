@@ -15,6 +15,8 @@
 #include "tctx.h"
 #include "poll.h"
 #include "timeout.h"
+#include "waitid.h"
+#include "futex.h"
 #include "cancel.h"
 
 struct io_cancel {
@@ -56,9 +58,8 @@ bool io_cancel_req_match(struct io_kiocb *req, struct io_cancel_data *cd)
 		return false;
 	if (cd->flags & IORING_ASYNC_CANCEL_ALL) {
 check_seq:
-		if (cd->seq == req->work.cancel_seq)
+		if (io_cancel_match_sequence(req, cd->seq))
 			return false;
-		req->work.cancel_seq = cd->seq;
 	}
 
 	return true;
@@ -119,6 +120,14 @@ int io_try_cancel(struct io_uring_task *tctx, struct io_cancel_data *cd,
 	if (ret != -ENOENT)
 		return ret;
 
+	ret = io_waitid_cancel(ctx, cd, issue_flags);
+	if (ret != -ENOENT)
+		return ret;
+
+	ret = io_futex_cancel(ctx, cd, issue_flags);
+	if (ret != -ENOENT)
+		return ret;
+
 	spin_lock(&ctx->completion_lock);
 	if (!(cd->flags & IORING_ASYNC_CANCEL_FD))
 		ret = io_timeout_cancel(ctx, cd);
@@ -175,9 +184,7 @@ static int __io_async_cancel(struct io_cancel_data *cd,
 	io_ring_submit_lock(ctx, issue_flags);
 	ret = -ENOENT;
 	list_for_each_entry(node, &ctx->tctx_list, ctx_node) {
-		struct io_uring_task *tctx = node->task->io_uring;
-
-		ret = io_async_cancel_one(tctx, cd);
+		ret = io_async_cancel_one(node->task->io_uring, cd);
 		if (ret != -ENOENT) {
 			if (!all)
 				break;
@@ -198,7 +205,7 @@ int io_async_cancel(struct io_kiocb *req, unsigned int issue_flags)
 		.opcode	= cancel->opcode,
 		.seq	= atomic_inc_return(&req->ctx->cancel_seq),
 	};
-	struct io_uring_task *tctx = req->task->io_uring;
+	struct io_uring_task *tctx = req->tctx;
 	int ret;
 
 	if (cd.flags & IORING_ASYNC_CANCEL_FD) {
@@ -225,16 +232,6 @@ done:
 	return IOU_OK;
 }
 
-void init_hash_table(struct io_hash_table *table, unsigned size)
-{
-	unsigned int i;
-
-	for (i = 0; i < size; i++) {
-		spin_lock_init(&table->hbs[i].lock);
-		INIT_HLIST_HEAD(&table->hbs[i].list);
-	}
-}
-
 static int __io_sync_cancel(struct io_uring_task *tctx,
 			    struct io_cancel_data *cd, int fd)
 {
@@ -243,10 +240,12 @@ static int __io_sync_cancel(struct io_uring_task *tctx,
 	/* fixed must be grabbed every time since we drop the uring_lock */
 	if ((cd->flags & IORING_ASYNC_CANCEL_FD) &&
 	    (cd->flags & IORING_ASYNC_CANCEL_FD_FIXED)) {
-		if (unlikely(fd >= ctx->nr_user_files))
+		struct io_rsrc_node *node;
+
+		node = io_rsrc_node_lookup(&ctx->file_table.data, fd);
+		if (unlikely(!node))
 			return -EBADF;
-		fd = array_index_nospec(fd, ctx->nr_user_files);
-		cd->file = io_file_from_index(&ctx->file_table, fd);
+		cd->file = io_slot_file(node);
 		if (!cd->file)
 			return -EBADF;
 	}

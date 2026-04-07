@@ -81,7 +81,7 @@ static void __ref __static_call_transform(void *insn, enum insn_type type,
 		break;
 
 	case RET:
-		if (cpu_wants_rethunk_at(insn))
+		if (cpu_feature_enabled(X86_FEATURE_RETHUNK))
 			code = text_gen_insn(JMP32_INSN_OPCODE, insn, x86_return_thunk);
 		else
 			code = &retinsn;
@@ -90,7 +90,7 @@ static void __ref __static_call_transform(void *insn, enum insn_type type,
 	case JCC:
 		if (!func) {
 			func = __static_call_return;
-			if (cpu_wants_rethunk())
+			if (cpu_feature_enabled(X86_FEATURE_RETHUNK))
 				func = x86_return_thunk;
 		}
 
@@ -180,7 +180,7 @@ noinstr void __static_call_update_early(void *tramp, void *func)
 	sync_core();
 }
 
-#ifdef CONFIG_RETHUNK
+#ifdef CONFIG_MITIGATION_RETHUNK
 /*
  * This is called by apply_returns() to fix up static call trampolines,
  * specifically ARCH_DEFINE_STATIC_CALL_NULL_TRAMP which is recorded as
