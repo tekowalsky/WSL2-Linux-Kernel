@@ -61,6 +61,21 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v7
 
+    - name: Prepare Rust kernel metadata
+      if: matrix.language == 'rust'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bc bison build-essential clang flex libclang-dev libelf-dev libssl-dev llvm python3
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.85.1 --profile minimal --component rust-src
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+        export PATH="$HOME/.cargo/bin:$PATH"
+        cargo install --locked --version "$(scripts/min-tool-version.sh bindgen)" bindgen-cli
+        make LLVM=1 x86_64_defconfig
+        scripts/kconfig/merge_config.sh -m .config kernel/configs/rust.config
+        make LLVM=1 olddefconfig
+        make LLVM=1 rust-analyzer
+
     # Add any setup steps before running the `github/codeql-action/init` action.
     # This includes steps like installing compilers or runtimes (`actions/setup-node`
     # or others). This is typically only required for manual builds.
