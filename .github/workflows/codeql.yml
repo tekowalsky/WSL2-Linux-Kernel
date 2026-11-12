@@ -70,7 +70,7 @@ jobs:
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.85.1 --profile minimal --component rust-src
         echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
         export PATH="$HOME/.cargo/bin:$PATH"
-        cargo install --locked --version "$(scripts/min-tool-version.sh bindgen)" bindgen-cli
+        cargo install --locked --version 0.69.5 bindgen-cli
         make LLVM=1 x86_64_defconfig
         scripts/kconfig/merge_config.sh -m .config kernel/configs/rust.config
         make LLVM=1 olddefconfig
