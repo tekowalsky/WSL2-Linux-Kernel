@@ -74,6 +74,7 @@ jobs:
         make LLVM=1 x86_64_defconfig
         scripts/kconfig/merge_config.sh -m .config kernel/configs/rust.config
         make LLVM=1 olddefconfig
+        make LLVM=1 prepare
         make LLVM=1 rust-analyzer
 
     - name: Install kernel build dependencies
